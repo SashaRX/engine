@@ -5,12 +5,19 @@ export default /* glsl */`
 
 float linearizeDepthWithParams(float z, vec4 cameraParams) {
     #ifdef REVERSE_Z
-        z = 1.0 - z;
+        // reverse-z stores 1 at the near plane and 0 at the far plane. The depth is linearized
+        // directly, as converting it to the standard convention first (1 - z) would discard the
+        // precision reverse-z keeps for distant surfaces
+        if (cameraParams.w == 0.0)
+            return (cameraParams.z * cameraParams.y) / (cameraParams.z + z * (cameraParams.y - cameraParams.z));
+        else
+            return cameraParams.y - z * (cameraParams.y - cameraParams.z);
+    #else
+        if (cameraParams.w == 0.0)
+            return (cameraParams.z * cameraParams.y) / (cameraParams.y + z * (cameraParams.z - cameraParams.y));
+        else
+            return cameraParams.z + z * (cameraParams.y - cameraParams.z);
     #endif
-    if (cameraParams.w == 0.0)
-        return (cameraParams.z * cameraParams.y) / (cameraParams.y + z * (cameraParams.z - cameraParams.y));
-    else
-        return cameraParams.z + z * (cameraParams.y - cameraParams.z);
 }
 
 #ifndef CAMERAPLANES

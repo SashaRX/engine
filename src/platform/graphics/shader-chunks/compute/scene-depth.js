@@ -14,7 +14,9 @@
  *
  * The producers of the depth map store it differently, and the engine compiles a variant of the
  * shader for the way the attached depth map is stored, using the SCENE_DEPTHMAP_LINEAR and
- * SCENE_DEPTHMAP_RECIPROCAL defines, so the decode involves no branching.
+ * SCENE_DEPTHMAP_RECIPROCAL defines, so the decode involves no branching. A depth map storing the
+ * depth buffer values is decoded for the depth convention of the device, using the REVERSE_Z
+ * define.
  *
  * @ignore
  */
@@ -61,8 +63,15 @@ fn sceneDepthLinear(texel: vec2i) -> f32 {
         #endif
     #else
         // the depth buffer value, linearized for either projection
-        let perspective = (params.z * params.y) / (params.y + value * (params.z - params.y));
-        let orthographic = params.z + value * (params.y - params.z);
+        #ifdef REVERSE_Z
+            // reverse-z stores 1 at the near plane and 0 at the far plane, linearized directly to
+            // keep the precision it has for distant surfaces
+            let perspective = (params.z * params.y) / (params.z + value * (params.y - params.z));
+            let orthographic = params.y - value * (params.y - params.z);
+        #else
+            let perspective = (params.z * params.y) / (params.y + value * (params.z - params.y));
+            let orthographic = params.z + value * (params.y - params.z);
+        #endif
         return select(perspective, orthographic, params.w > 0.5);
     #endif
 }
@@ -82,8 +91,14 @@ fn sceneDepthWorldPosition(texel: vec2i) -> vec3f {
         // the linear depth places the surface between the points of the texel on the near and the
         // far plane, along which the depth changes linearly
         let params = uniform.computeSceneDepthCameraParams;
-        let nearPoint = sceneDepthUnproject(vec3f(ndc, 0.0));
-        let farPoint = sceneDepthUnproject(vec3f(ndc, 1.0));
+        #ifdef REVERSE_Z
+            // with reverse-z, the near plane is at the depth of 1 and the far plane at 0
+            let nearPoint = sceneDepthUnproject(vec3f(ndc, 1.0));
+            let farPoint = sceneDepthUnproject(vec3f(ndc, 0.0));
+        #else
+            let nearPoint = sceneDepthUnproject(vec3f(ndc, 0.0));
+            let farPoint = sceneDepthUnproject(vec3f(ndc, 1.0));
+        #endif
         return mix(nearPoint, farPoint, (sceneDepthLinear(texel) - params.z) / (params.y - params.z));
     #else
         // the depth buffer value is the depth the surface was projected to

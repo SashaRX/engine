@@ -23,31 +23,41 @@ var uSceneDepthMap: texture_2d<uff>;
         uniform camera_params: vec4f; // x: 1 / camera_far,      y: camera_far,     z: camera_near,        w: is_ortho
     #endif
 
-    fn linearizeDepth(zIn: f32) -> f32 {
+    fn linearizeDepth(z: f32) -> f32 {
         #ifdef REVERSE_Z
-            let z: f32 = 1.0 - zIn;
+            // reverse-z stores 1 at the near plane and 0 at the far plane. The depth is linearized
+            // directly, as converting it to the standard convention first (1 - z) would discard the
+            // precision reverse-z keeps for distant surfaces
+            if (uniform.camera_params.w == 0.0) { // Perspective
+                return (uniform.camera_params.z * uniform.camera_params.y) / (uniform.camera_params.z + z * (uniform.camera_params.y - uniform.camera_params.z));
+            } else {
+                return uniform.camera_params.y - z * (uniform.camera_params.y - uniform.camera_params.z);
+            }
         #else
-            let z: f32 = zIn;
+            if (uniform.camera_params.w == 0.0) { // Perspective
+                return (uniform.camera_params.z * uniform.camera_params.y) / (uniform.camera_params.y + z * (uniform.camera_params.z - uniform.camera_params.y));
+            } else {
+                return uniform.camera_params.z + z * (uniform.camera_params.y - uniform.camera_params.z);
+            }
         #endif
-        if (uniform.camera_params.w == 0.0) { // Perspective
-            return (uniform.camera_params.z * uniform.camera_params.y) / (uniform.camera_params.y + z * (uniform.camera_params.z - uniform.camera_params.y));
-        } else {
-            return uniform.camera_params.z + z * (uniform.camera_params.y - uniform.camera_params.z);
-        }
     }
 #endif
 
 fn delinearizeDepth(linearDepth: f32) -> f32 {
-    var z: f32;
-    if (uniform.camera_params.w == 0.0) {
-        z = (uniform.camera_params.y * (uniform.camera_params.z - linearDepth)) / (linearDepth * (uniform.camera_params.z - uniform.camera_params.y));
-    } else {
-        z = (linearDepth - uniform.camera_params.z) / (uniform.camera_params.y - uniform.camera_params.z);
-    }
     #ifdef REVERSE_Z
-        z = 1.0 - z;
+        // the inverse of linearizeDepth, to the reverse-z depth buffer value
+        if (uniform.camera_params.w == 0.0) {
+            return (uniform.camera_params.z * (uniform.camera_params.y - linearDepth)) / (linearDepth * (uniform.camera_params.y - uniform.camera_params.z));
+        } else {
+            return (uniform.camera_params.y - linearDepth) / (uniform.camera_params.y - uniform.camera_params.z);
+        }
+    #else
+        if (uniform.camera_params.w == 0.0) {
+            return (uniform.camera_params.y * (uniform.camera_params.z - linearDepth)) / (linearDepth * (uniform.camera_params.z - uniform.camera_params.y));
+        } else {
+            return (linearDepth - uniform.camera_params.z) / (uniform.camera_params.y - uniform.camera_params.z);
+        }
     #endif
-    return z;
 }
 
 // Retrieves rendered linear camera depth by UV
