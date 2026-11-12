@@ -1,3 +1,4 @@
+import { Camera } from '../../scene/camera.js';
 import { RenderView } from '../../scene/render-view.js';
 import { Texture } from '../../platform/graphics/texture.js';
 import { Mat4 } from '../../core/math/mat4.js';
@@ -257,6 +258,12 @@ class XrView extends RenderView {
             this._xrView.transform.matrix,
             this._xrView.transform.inverse.matrix
         );
+
+        // the projection is used as provided, with the 0..1 depth range of WebGPU, which reverse-z
+        // reverses
+        if (this._manager.app.graphicsDevice.isReverseZ) {
+            Camera.applyReverseZ(this._projMat);
+        }
 
         this._updateTextureColor();
         this._updateDepth(frame);

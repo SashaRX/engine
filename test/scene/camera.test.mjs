@@ -564,6 +564,75 @@ describe('Camera', function () {
             expect(camera.frustum.containsPoint(new Vec3(0, 0, -10))).to.be.false;
         });
     });
+
+    describe('.applyShaderProjectionTransform (reverse-z)', function () {
+
+        // the NDC depth a projection maps a view space point to
+        const ndcDepth = (projection, viewZ) => {
+            const clip = new Vec4();
+            projection.transformVec4(new Vec4(0, 0, viewZ, 1), clip);
+            return clip.z / clip.w;
+        };
+
+        const perspective = new Mat4().setPerspective(60, 1.5, 0.1, 1000);
+        const orthographic = new Mat4().setOrtho(-2, 2, -1, 1, 0.5, 100);
+
+        // the matrices store float32 values
+        const epsilon = 1e-6;
+
+        it('maps the near plane to 1 and the far plane to 0 on WebGPU', function () {
+            for (const [projection, near, far] of [[perspective, 0.1, 1000], [orthographic, 0.5, 100]]) {
+                for (const flipY of [false, true]) {
+                    const out = Camera.applyShaderProjectionTransform(projection, new Mat4(), flipY, true, true);
+                    expect(ndcDepth(out, -near)).to.be.closeTo(1, epsilon);
+                    expect(ndcDepth(out, -far)).to.be.closeTo(0, epsilon);
+                }
+            }
+        });
+
+        it('reverses the standard WebGPU depth exactly', function () {
+            for (const projection of [perspective, orthographic]) {
+                const standard = Camera.applyShaderProjectionTransform(projection, new Mat4(), false, true, false);
+                const reversed = Camera.applyShaderProjectionTransform(projection, new Mat4(), false, true, true);
+                for (const viewZ of [-0.5, -1, -10, -99]) {
+                    expect(ndcDepth(reversed, viewZ)).to.be.closeTo(1 - ndcDepth(standard, viewZ), epsilon);
+                }
+            }
+        });
+
+        it('leaves the projection unchanged without the WebGPU depth range', function () {
+            const out = Camera.applyShaderProjectionTransform(perspective, new Mat4(), false, false, true);
+            expect(out.equals(perspective)).to.be.true;
+        });
+
+        it('defaults to the standard convention', function () {
+            const out = Camera.applyShaderProjectionTransform(perspective, new Mat4(), false, true);
+            expect(ndcDepth(out, -0.1)).to.be.closeTo(0, epsilon);
+            expect(ndcDepth(out, -1000)).to.be.closeTo(1, epsilon);
+        });
+    });
+
+    describe('.applyReverseZ', function () {
+
+        it('reverses the 0..1 depth range of a projection in place', function () {
+            const standard = Camera.applyShaderProjectionTransform(new Mat4().setPerspective(45, 1, 1, 50), new Mat4(), false, true);
+            const reversed = Camera.applyReverseZ(standard.clone());
+
+            const clip = new Vec4();
+            for (const viewZ of [-1, -2, -25, -50]) {
+                standard.transformVec4(new Vec4(0.3, -0.2, viewZ, 1), clip);
+                const standardDepth = clip.z / clip.w;
+                reversed.transformVec4(new Vec4(0.3, -0.2, viewZ, 1), clip);
+                expect(clip.z / clip.w).to.be.closeTo(1 - standardDepth, 1e-6);
+            }
+
+            // the reversed projection matches the one applyShaderProjectionTransform builds
+            const direct = Camera.applyShaderProjectionTransform(new Mat4().setPerspective(45, 1, 1, 50), new Mat4(), false, true, true);
+            for (let i = 0; i < 16; i++) {
+                expect(reversed.data[i]).to.be.closeTo(direct.data[i], 1e-6);
+            }
+        });
+    });
 });
 
 describe('CameraComponent', function () {

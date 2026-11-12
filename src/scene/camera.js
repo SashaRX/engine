@@ -106,6 +106,24 @@ class Camera {
     }
 
     /**
+     * Remaps, in place, the clip depth of a projection with the 0..1 depth range of WebGPU to the
+     * reversed 1..0 range of reverse-z (z' = w - z). Used for the projections WebXR provides
+     * directly on WebGPU, which do not go through {@link Camera.applyShaderProjectionTransform}.
+     *
+     * @param {Mat4} projection - The projection to remap.
+     * @returns {Mat4} The projection.
+     */
+    static applyReverseZ(projection) {
+        // column-major: the z row becomes the w row minus the z row
+        const d = projection.data;
+        d[2] = d[3] - d[2];
+        d[6] = d[7] - d[6];
+        d[10] = d[11] - d[10];
+        d[14] = d[15] - d[14];
+        return projection;
+    }
+
+    /**
      * @type {ShaderPassInfo|null}
      */
     shaderPassInfo = null;
