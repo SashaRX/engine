@@ -47,6 +47,7 @@ class MeshLine {
 
         this._material.blendState = BlendState.ALPHABLEND;
         this._material.setDefine('DEPTH_WRITE', '1');
+        // the near plane, which is at the depth of 1 with reverse-z
         this._material.setParameter('uDepth', app.graphicsDevice.isReverseZ ? 1 : 0);
         this._material.update();
 

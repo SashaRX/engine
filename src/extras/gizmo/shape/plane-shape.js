@@ -133,7 +133,7 @@ class PlaneShape extends Shape {
         ]);
 
         this._outlineMaterial.setDefine('DEPTH_WRITE', this._depth > 0 ? '1' : '0');
-        this._outlineMaterial.setParameter('uDepth', this._depth);
+        this._outlineMaterial.setParameter('uDepth', this._getDeviceDepth(this._depth));
         this._outlineMaterial.cull = this._cull;
         this._outlineMaterial.blendType = BLEND_NORMAL;
         this._outlineMaterial.update();

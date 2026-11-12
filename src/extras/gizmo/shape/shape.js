@@ -392,6 +392,19 @@ class Shape {
     }
 
     /**
+     * Converts a depth in the standard convention (0 at the near plane, 1 at the far plane) to the
+     * value the depth buffer of the device stores, which is reversed with reverse-z. A negative
+     * depth, meaning the interpolated depth of the geometry is used, is returned unchanged.
+     *
+     * @param {number} depth - The depth in the standard convention.
+     * @returns {number} The depth buffer value.
+     * @protected
+     */
+    _getDeviceDepth(depth) {
+        return this.device.isReverseZ && depth >= 0 ? 1 - depth : depth;
+    }
+
+    /**
      * Create a render component for an entity.
      *
      * @param {Entity} entity - The entity to create the render component for.
@@ -401,9 +414,7 @@ class Shape {
     _createRenderComponent(entity, meshes) {
         const color = this._disabled ? this._disabledColor : this._defaultColor;
         this._material.setDefine('DEPTH_WRITE', this._depth > 0 ? '1' : '0');
-        // _depth is in standard convention (0=near, 1=far) — flip for reverse-z hardware
-        const uDepth = this.device.isReverseZ && this._depth >= 0 ? 1 - this._depth : this._depth;
-        this._material.setParameter('uDepth', uDepth);
+        this._material.setParameter('uDepth', this._getDeviceDepth(this._depth));
         this._material.setParameter('uColor', color.toArray());
         this._material.cull = this._cull;
         this._material.blendType = BLEND_NORMAL;

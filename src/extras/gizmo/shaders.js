@@ -29,7 +29,13 @@ export const unlitShader = {
     
         void main(void) {
             gl_Position = matrix_viewProjection * matrix_model * vec4(vertex_position, 1.0);
-            gl_Position.z = clamp(gl_Position.z, -abs(gl_Position.w), abs(gl_Position.w));
+            #ifdef REVERSE_Z
+                // keep the far side from clipping, as in the standard convention below - with
+                // reverse-z the far plane is at depth 0, and in front of the near plane is above w
+                gl_Position.z = clamp(gl_Position.z, 0.0, 2.0 * abs(gl_Position.w));
+            #else
+                gl_Position.z = clamp(gl_Position.z, -abs(gl_Position.w), abs(gl_Position.w));
+            #endif
             #ifdef TEXTURE
                 vUv = vertex_texCoord0;
             #endif
@@ -85,7 +91,13 @@ export const unlitShader = {
             var output: VertexOutput;
             let pos = vec4f(input.vertex_position, 1.0);
             output.position = uniform.matrix_viewProjection * uniform.matrix_model * pos;
-            output.position.z = clamp(output.position.z, -abs(output.position.w), abs(output.position.w));
+            #ifdef REVERSE_Z
+                // keep the far side from clipping, as in the standard convention below - with
+                // reverse-z the far plane is at depth 0, and in front of the near plane is above w
+                output.position.z = clamp(output.position.z, 0.0, 2.0 * abs(output.position.w));
+            #else
+                output.position.z = clamp(output.position.z, -abs(output.position.w), abs(output.position.w));
+            #endif
             #ifdef TEXTURE
                 output.vUv = input.vertex_texCoord0;
             #endif
@@ -176,7 +188,13 @@ export const lineBatchShader = {
                 view.xyz *= ortho ? vec3(1.0, 1.0, 1.0 - LINE_PULL) : vec3(1.0 - LINE_PULL);
             #endif
             gl_Position = matrix_projection * view;
-            gl_Position.z = clamp(gl_Position.z, -abs(gl_Position.w), abs(gl_Position.w));
+            #ifdef REVERSE_Z
+                // keep the far side from clipping, as in the standard convention below - with
+                // reverse-z the far plane is at depth 0, and in front of the near plane is above w
+                gl_Position.z = clamp(gl_Position.z, 0.0, 2.0 * abs(gl_Position.w));
+            #else
+                gl_Position.z = clamp(gl_Position.z, -abs(gl_Position.w), abs(gl_Position.w));
+            #endif
             #ifdef OCCLUDED
                 vColor = instance_occludedColor;
             #else
@@ -234,7 +252,13 @@ export const lineBatchShader = {
                 view = vec4f(view.xyz * pull, view.w);
             #endif
             output.position = uniform.matrix_projection * view;
-            output.position.z = clamp(output.position.z, -abs(output.position.w), abs(output.position.w));
+            #ifdef REVERSE_Z
+                // keep the far side from clipping, as in the standard convention below - with
+                // reverse-z the far plane is at depth 0, and in front of the near plane is above w
+                output.position.z = clamp(output.position.z, 0.0, 2.0 * abs(output.position.w));
+            #else
+                output.position.z = clamp(output.position.z, -abs(output.position.w), abs(output.position.w));
+            #endif
             #ifdef OCCLUDED
                 output.vColor = input.instance_occludedColor;
             #else
