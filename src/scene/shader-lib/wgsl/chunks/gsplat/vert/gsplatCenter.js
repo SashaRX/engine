@@ -50,7 +50,12 @@ fn initCenter(modelCenter: vec3f, center: ptr<function, SplatCenter>) -> bool {
             let near: f32 = uniform.camera_params.z;
             let far: f32 = uniform.camera_params.y;
             let linearDepth: f32 = neg_z;
-            let depthNdc: f32 = clamp((linearDepth - near) / (far - near), 0.0, 1.0);
+            #ifdef REVERSE_Z
+                // reverse-z: 1 at the near plane, 0 at the far plane
+                let depthNdc: f32 = clamp((far - linearDepth) / (far - near), 0.0, 1.0);
+            #else
+                let depthNdc: f32 = clamp((linearDepth - near) / (far - near), 0.0, 1.0);
+            #endif
 
             center.proj = vec4f(ndc, depthNdc, 1.0);
             center.projMat00 = uniform.fisheye_projMat00;

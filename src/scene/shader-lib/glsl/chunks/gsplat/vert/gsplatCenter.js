@@ -50,7 +50,10 @@ bool initCenter(vec3 modelCenter, inout SplatCenter center) {
             float near = camera_params.z;
             float far = camera_params.y;
             float linearDepth = neg_z;
-            #if WEBGPU
+            #if defined(WEBGPU) && defined(REVERSE_Z)
+                // reverse-z: 1 at the near plane, 0 at the far plane
+                float depthNdc = clamp((far - linearDepth) / (far - near), 0.0, 1.0);
+            #elif WEBGPU
                 float depthNdc = clamp((linearDepth - near) / (far - near), 0.0, 1.0);
             #else
                 float depthNdc = clamp(2.0 * (linearDepth - near) / (far - near) - 1.0, -1.0, 1.0);

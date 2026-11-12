@@ -795,7 +795,9 @@ class GSplatHybridRenderer extends GSplatRenderer {
      *   projector stores `clipPos.w` in slot [3] and the dot-product yields `-view.z`.
      * - Fisheye: `dst = (0, 0, far - near, near)`. The projector stores depthNdc in
      *   slot [2] and `1.0` in slot [3], so the dot-product reduces to
-     *   `depthNdc * (far - near) + near`, which equals linear `-view.z`.
+     *   `depthNdc * (far - near) + near`, which equals linear `-view.z`. With reverse-z the
+     *   depthNdc runs from 1 at the near plane to 0 at the far plane, and
+     *   `dst = (0, 0, near - far, far)`.
      *
      * The destination buffer must be retained by the caller (typically a per-material
      * instance field) because the GPU upload happens at draw time.
@@ -811,8 +813,14 @@ class GSplatHybridRenderer extends GSplatRenderer {
             const far = cam.farClip;
             dst[0] = 0;
             dst[1] = 0;
-            dst[2] = far - near;
-            dst[3] = near;
+            if (this.device.isReverseZ) {
+                // the fisheye depth is linear, from 1 at the near plane to 0 at the far plane
+                dst[2] = near - far;
+                dst[3] = far;
+            } else {
+                dst[2] = far - near;
+                dst[3] = near;
+            }
             return;
         }
         // canonical (unflipped) projection - matches the projector cache; the raster-time flip

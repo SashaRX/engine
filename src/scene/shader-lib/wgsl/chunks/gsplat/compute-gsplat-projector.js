@@ -195,10 +195,19 @@ fn main(
             let neg_z = -viewCenter.z;
             let ndcX = proj.screen.x / uniforms.viewportWidth * 2.0 - 1.0;
             let ndcY = proj.screen.y / uniforms.viewportHeight * 2.0 - 1.0;
-            let depthNdc = clamp(
-                (neg_z - uniforms.nearClip) / (uniforms.farClip - uniforms.nearClip),
-                0.0, 1.0
-            );
+            #ifdef REVERSE_Z
+                // reverse-z: 1 at the near plane, 0 at the far plane. The VS recovers the linear
+                // depth via clipToViewZ = (0, 0, near-far, far)
+                let depthNdc = clamp(
+                    (uniforms.farClip - neg_z) / (uniforms.farClip - uniforms.nearClip),
+                    0.0, 1.0
+                );
+            #else
+                let depthNdc = clamp(
+                    (neg_z - uniforms.nearClip) / (uniforms.farClip - uniforms.nearClip),
+                    0.0, 1.0
+                );
+            #endif
             clipPos = vec4f(ndcX, ndcY, depthNdc, 1.0);
         #else
             clipPos = uniforms.viewProj * vec4f(center, 1.0);
