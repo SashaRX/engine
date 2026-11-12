@@ -5,6 +5,7 @@
 // reverse-z (distant coplanar pairs z-fight) - WebGL2 lacks reverse-z support so it acts as the
 // "feature off" comparison.
 // @flag PREFERRED_DEVICE=webgpu
+
 import {
     AppBase,
     AppOptions,
@@ -43,10 +44,7 @@ device.maxPixelRatio = Math.min(window.devicePixelRatio, 2);
 
 const createOptions = new AppOptions();
 createOptions.graphicsDevice = device;
-createOptions.componentSystems = [
-    RenderComponentSystem,
-    CameraComponentSystem
-];
+createOptions.componentSystems = [RenderComponentSystem, CameraComponentSystem];
 createOptions.resourceHandlers = [TextureHandler];
 
 const app = new AppBase(canvas);
