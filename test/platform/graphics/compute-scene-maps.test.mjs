@@ -3,6 +3,7 @@ import sinon from 'sinon';
 
 import { Mat4 } from '../../../src/core/math/mat4.js';
 import { Vec4 } from '../../../src/core/math/vec4.js';
+import { Application } from '../../../src/framework/application.js';
 import { Compute } from '../../../src/platform/graphics/compute.js';
 import {
     BUFFERUSAGE_COPY_SRC, PIXELFORMAT_R32F, PIXELFORMAT_RGBA32F, PIXELFORMAT_RGBA8, SHADERLANGUAGE_WGSL
@@ -12,6 +13,7 @@ import { StorageBuffer } from '../../../src/platform/graphics/storage-buffer.js'
 import { Texture } from '../../../src/platform/graphics/texture.js';
 import { Camera } from '../../../src/scene/camera.js';
 import { createApp } from '../../app.mjs';
+import { createGraphicsDevice } from '../../device.mjs';
 import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
 
 /**
@@ -207,11 +209,11 @@ describe('Compute', function () {
         Camera.applyShaderProjectionTransform(new Mat4().setPerspective(60, 2, near, far), viewProjection, false, true);
         const viewProjectionInverse = viewProjection.clone().invert();
 
-        const createCamera = () => {
+        const createCamera = (inverse = viewProjectionInverse) => {
             const camera = new Camera(device);
             camera.nearClip = near;
             camera.farClip = far;
-            camera._viewProjInverse.copy(viewProjectionInverse);
+            camera._viewProjInverse.copy(inverse);
             return camera;
         };
 
@@ -239,8 +241,8 @@ describe('Compute', function () {
             });
         };
 
-        const run = async (values, linear, reciprocal) => {
-            const camera = createCamera();
+        const run = async (values, linear, reciprocal, inverse) => {
+            const camera = createCamera(inverse);
             const texture = new Texture(device, {
                 width: depths.length, height: 1, format: PIXELFORMAT_R32F, mipmaps: false, levels: [new Float32Array(values)]
             });
@@ -281,6 +283,41 @@ describe('Compute', function () {
             const { data, variant } = await run(depths.map(depth => 1 / depth), true, true);
             check(data);
             expect(variant.computeDefinition.cdefines.has('SCENE_DEPTHMAP_RECIPROCAL')).to.equal(true);
+        });
+
+        describe('with reverse-z', function () {
+
+            // the projection the shaders are given with reverse-z, which maps the near plane to 1
+            const reversed = new Mat4();
+            Camera.applyShaderProjectionTransform(new Mat4().setPerspective(60, 2, near, far), reversed, false, true, true);
+            const reversedInverse = reversed.clone().invert();
+
+            beforeEach(function () {
+                // replace the application with one on a reverse-z device
+                app.destroy();
+                const canvas = document.createElement('canvas');
+                device = createGraphicsDevice(canvas, { reverseZ: true });
+                app = new Application(canvas, { graphicsDevice: device });
+            });
+
+            it('decodes a reverse-z depth buffer', async function () {
+                const values = depths.map((depth) => {
+                    const clip = reversed.transformVec4(new Vec4(0, 0, -depth, 1), new Vec4());
+                    return clip.z / clip.w;
+                });
+                const { data } = await run(values, false, false, reversedInverse);
+                check(data);
+            });
+
+            it('decodes a linear depth', async function () {
+                const { data } = await run(depths, true, false, reversedInverse);
+                check(data);
+            });
+
+            it('decodes a reciprocal depth', async function () {
+                const { data } = await run(depths.map(depth => 1 / depth), true, true, reversedInverse);
+                check(data);
+            });
         });
 
         describe('with a camera rendering to a part of its target', function () {
