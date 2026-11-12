@@ -176,6 +176,13 @@ class GraphicsDevice extends EventHandler {
      * default depth comparison uses GREATER/GREATEREQUAL. This significantly improves depth
      * precision over large view distances. Opt-in via the `reverseZ` create option (WebGPU only).
      *
+     * The engine's depth related API keeps the standard convention when reverse-z is enabled, and
+     * translates it to the depth buffer: depth functions such as {@link FUNC_LESS} mean "closer
+     * passes", a clear depth value of 1 is the far plane, a positive {@link DepthState#depthBias}
+     * pushes away from the camera, and {@link DEPTHRESOLVE_MIN} resolves to the nearest sample.
+     * Shaders are compiled with the `REVERSE_Z` define, and custom shaders reading the raw depth
+     * buffer values need to handle it.
+     *
      * @type {boolean}
      * @readonly
      */
@@ -945,6 +952,10 @@ class GraphicsDevice extends EventHandler {
         if (this.supportsPacked4x8IntegerDotProduct) capsDefines.set('CAPS_PACKED_4X8_INTEGER_DOT_PRODUCT', '');
         if (this.supportsTextureAndSamplerLet) capsDefines.set('CAPS_TEXTURE_AND_SAMPLER_LET', '');
         if (this.supportsStorageTextureRead) capsDefines.set('CAPS_STORAGE_TEXTURE_READ', '');
+
+        // the depth convention, so that every shader - vertex, fragment and compute - can handle
+        // reading and writing the depth in either of them
+        if (this.isReverseZ) capsDefines.set('REVERSE_Z', '');
 
         // Platform defines
         if (platform.desktop) capsDefines.set('PLATFORM_DESKTOP', '');
