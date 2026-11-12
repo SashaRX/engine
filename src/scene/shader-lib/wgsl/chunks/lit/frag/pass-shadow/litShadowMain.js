@@ -39,6 +39,18 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
             #endif
         #endif
 
+        // With reverse-z, the shadow maps storing the depth in a color texture (VSM, PCSS) keep the
+        // standard convention - 0 at the near plane of the light, 1 at its far plane - which their
+        // clear value, filtering and the comparison of the receivers rely on. Only the depth buffer
+        // of the PCF shadow maps uses reverse-z. The linearized depth needs no conversion.
+        #ifdef REVERSE_Z
+            #if SHADOW_TYPE == VSM_16F || SHADOW_TYPE == VSM_32F || SHADOW_TYPE == PCSS_32F
+                #if LIGHT_TYPE == DIRECTIONAL
+                    depth = 1.0 - depth;
+                #endif
+            #endif
+        #endif
+
     #else
         var depth: f32 = min(distance(uniform.view_position, input.vPositionW) / uniform.light_radius, 0.99999);
         #define MODIFIED_DEPTH

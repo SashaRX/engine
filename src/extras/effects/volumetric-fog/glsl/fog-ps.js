@@ -54,7 +54,15 @@ export default /* glsl */`
             vec3 shadowCoord = (uFogShadowMatrixPalette[cascadeIndex] * vec4(worldPos, 1.0)).xyz;
             // the biased depth beyond the far plane of the shadow stays below the cleared depth of the
             // shadow map, so only the casters in the shadow map shadow it
-            float z = min(shadowCoord.z - uFogShadowParams.y, 0.9999);
+            #if defined(REVERSE_Z) && defined(FOG_SHADOW_PCF)
+                // the depth buffer of a PCF shadow map uses reverse-z, 0 being its far plane
+                float z = max(shadowCoord.z + uFogShadowParams.y, 0.0001);
+            #elif defined(REVERSE_Z)
+                // the color shadow maps (VSM, PCSS) store the standard depth, see litShadowMain
+                float z = min((1.0 - shadowCoord.z) - uFogShadowParams.y, 0.9999);
+            #else
+                float z = min(shadowCoord.z - uFogShadowParams.y, 0.9999);
+            #endif
 
             #if defined(FOG_SHADOW_PCF)
                 // hardware comparison on the depth format shadow map

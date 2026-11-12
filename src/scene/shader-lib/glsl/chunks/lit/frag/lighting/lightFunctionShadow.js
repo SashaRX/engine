@@ -39,19 +39,23 @@ export default /* glsl */`
 
             vec4 positionInShadowSpace = shadowTransform * vec4(surfacePosition, 1.0);
             #ifdef LIGHT{i}_SHADOW_SAMPLE_ORTHO
+                #ifdef REVERSE_Z
+                    // the shadow matrix produces the reverse-z depth (1 at the near plane of the light,
+                    // 0 at its far plane), which the PCF shadow maps store in their depth buffer. The
+                    // VSM and PCSS shadow maps store the standard depth in a color texture instead (see
+                    // litShadowMain), so convert the receiver to it for those
+                    #if LIGHT{i}SHADOWTYPE == VSM_16F || LIGHT{i}SHADOWTYPE == VSM_32F || LIGHT{i}SHADOWTYPE == PCSS_32F
+                        positionInShadowSpace.z = 1.0 - positionInShadowSpace.z;
+                    #endif
+                #endif
                 #if LIGHT{i}SHADOWTYPE == PCSS_32F
                     // PCSS needs the depth of the receivers beyond the far plane, for their distance to
                     // the blockers, and clamps the depth itself where it samples the shadow map
-                    #ifdef REVERSE_Z
-                        // reverse-z: 1=near light, 0=far. Push the receiver towards the light (greater z)
-                        positionInShadowSpace.z += 0.0001;
-                    #else
-                        positionInShadowSpace.z -= 0.0001;
-                    #endif
+                    positionInShadowSpace.z -= 0.0001;
                 #else
-                    #ifdef REVERSE_Z
-                        // reverse-z: 1=near light, 0=far. Push receiver TOWARDS light (greater z)
-                        // so the GREATER hardware compare reports lit against its own surface.
+                    #if defined(REVERSE_Z) && LIGHT{i}SHADOWTYPE != VSM_16F && LIGHT{i}SHADOWTYPE != VSM_32F
+                        // PCF with reverse-z: push the receiver towards the light (greater z), so the
+                        // GREATER hardware comparison reports it lit against its own surface
                         positionInShadowSpace.z = saturate(positionInShadowSpace.z) + 0.0001;
                     #else
                         positionInShadowSpace.z = saturate(positionInShadowSpace.z) - 0.0001;

@@ -15,6 +15,16 @@ vec4 getShadowOutput() {
     // rasterized depth
     float depth = gl_FragCoord.z;
 
+    // with reverse-z, the shadow maps storing the depth in a color texture keep the standard
+    // convention, see litShadowMain
+    #ifdef REVERSE_Z
+        #if SHADOW_TYPE == VSM_16F || SHADOW_TYPE == VSM_32F || SHADOW_TYPE == PCSS_32F
+            #if LIGHT_TYPE == DIRECTIONAL
+                depth = 1.0 - depth;
+            #endif
+        #endif
+    #endif
+
     #if SHADOW_TYPE == VSM_16F || SHADOW_TYPE == VSM_32F
 
         // Rasterization of degenerate triangles, which animated meshes can generate, can supply

@@ -48,14 +48,7 @@ fn PCSSFindBlocker(shadowMap: texture_2d<f32>, shadowMapSampler: sampler, avgBlo
     for( var i: i32 = 0; i < shadowBlockerSamples; i = i + 1 ) {
         let diskUV: vec2f = generateDiskSample(&diskData);
         let sampleUV: vec2f = shadowCoords + diskUV * searchWidthUv;
-        let raw: f32 = textureSampleLevel(shadowMap, shadowMapSampler, sampleUV, 0.0).r;
-        // shadow map stores reverse-z hardware depth (1=near light, 0=far). Flip to
-        // forward-z so the existing comparison logic ("smaller = closer to light") holds.
-        #ifdef REVERSE_Z
-            let shadowMapDepth: f32 = 1.0 - raw;
-        #else
-            let shadowMapDepth: f32 = raw;
-        #endif
+        let shadowMapDepth: f32 = textureSampleLevel(shadowMap, shadowMapSampler, sampleUV, 0.0).r;
         if ( shadowMapDepth < z ) {
             blockerSum = blockerSum + shadowMapDepth;
             numBlockers_local = numBlockers_local + 1;
@@ -73,12 +66,7 @@ fn PCSSFilter(shadowMap: texture_2d<f32>, shadowMapSampler: sampler, uv: vec2f, 
     var sum: f32 = 0.0;
     for (var i: i32 = 0; i < shadowSamples; i = i + 1) {
         let offsetUV: vec2f = generateDiskSample(&diskData) * filterRadius;
-        let raw: f32 = textureSampleLevel(shadowMap, shadowMapSampler, uv + offsetUV, 0.0).r;
-        #ifdef REVERSE_Z
-            let depth: f32 = 1.0 - raw;
-        #else
-            let depth: f32 = raw;
-        #endif
+        let depth: f32 = textureSampleLevel(shadowMap, shadowMapSampler, uv + offsetUV, 0.0).r;
         sum = sum + step(receiverDepth, depth);
     }
     return sum / f32(shadowSamples);
@@ -86,12 +74,7 @@ fn PCSSFilter(shadowMap: texture_2d<f32>, shadowMapSampler: sampler, uv: vec2f, 
 
 fn PCSSDirectional(shadowMap: texture_2d<f32>, shadowMapSampler: sampler, shadowCoords: vec3f, cameraParams: vec4f, softShadowParams: vec4f) -> f32 {
 
-    // flip receiver to forward-z so the rest of the function operates in a single convention
-    #ifdef REVERSE_Z
-        let receiverDepth: f32 = 1.0 - shadowCoords.z;
-    #else
-        let receiverDepth: f32 = shadowCoords.z;
-    #endif
+    let receiverDepth: f32 = shadowCoords.z;
     // for sampling against the shadow map we clamp so cleared cells (depth = 1) don't get
     // treated as blockers when the receiver sits outside the tightened cascade range.
     // worldDist further down uses the *unclamped* receiverDepth so it stays cascade-stable.
