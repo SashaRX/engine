@@ -3,8 +3,8 @@ import sinon from 'sinon';
 
 import { BlendState } from '../../../../src/platform/graphics/blend-state.js';
 import {
-    CULLFACE_BACK, FRONTFACE_CCW, FUNC_GREATER, FUNC_LESSEQUAL, PRIMITIVE_LINES, PRIMITIVE_POINTS,
-    PRIMITIVE_TRIANGLES
+    CULLFACE_BACK, FRONTFACE_CCW, FUNC_ALWAYS, FUNC_EQUAL, FUNC_GREATER, FUNC_GREATEREQUAL, FUNC_LESS,
+    FUNC_LESSEQUAL, FUNC_NEVER, FUNC_NOTEQUAL, PRIMITIVE_LINES, PRIMITIVE_POINTS, PRIMITIVE_TRIANGLES
 } from '../../../../src/platform/graphics/constants.js';
 import { DepthState } from '../../../../src/platform/graphics/depth-state.js';
 import { StencilParameters } from '../../../../src/platform/graphics/stencil-parameters.js';
@@ -96,6 +96,53 @@ describe('WebgpuRenderPipeline', function () {
             const depthStencil = getDepthStencil(createDepthState(-2, 0.5), 'line-list');
             expect(depthStencil.depthBias).to.equal(0);
             expect(depthStencil.depthBiasSlopeScale).to.equal(0);
+        });
+
+    });
+
+    describe('#getDepthStencil (reverse-z)', function () {
+
+        const getDepthStencil = (depthState, topology = 'triangle-list', isReverseZ = true, stencilEnabled = false, stencilParams = stencil) => {
+            const target = { ...renderTarget, stencil: stencilEnabled };
+            return new WebgpuRenderPipeline({ isReverseZ }).getDepthStencil(
+                depthState, target, stencilEnabled, stencilParams, stencilParams, topology);
+        };
+
+        const funcs = [
+            [FUNC_NEVER, 'never', 'never'],
+            [FUNC_LESS, 'less', 'greater'],
+            [FUNC_EQUAL, 'equal', 'equal'],
+            [FUNC_LESSEQUAL, 'less-equal', 'greater-equal'],
+            [FUNC_GREATER, 'greater', 'less'],
+            [FUNC_NOTEQUAL, 'not-equal', 'not-equal'],
+            [FUNC_GREATEREQUAL, 'greater-equal', 'less-equal'],
+            [FUNC_ALWAYS, 'always', 'always']
+        ];
+
+        it('translates the depth function, so that "closer passes" keeps its meaning', function () {
+            for (const [func, standard, reversed] of funcs) {
+                expect(getDepthStencil(new DepthState(func), 'triangle-list', false).depthCompare).to.equal(standard);
+                expect(getDepthStencil(new DepthState(func)).depthCompare).to.equal(reversed);
+            }
+        });
+
+        it('negates the depth bias, so that a positive bias still pushes away from the camera', function () {
+            const depthStencil = getDepthStencil(createDepthState(2.7, 0.5));
+            expect(depthStencil.depthBias).to.equal(-2);
+            expect(depthStencil.depthBiasSlopeScale).to.equal(-0.5);
+        });
+
+        it('does not apply a depth bias to lines', function () {
+            const depthStencil = getDepthStencil(createDepthState(-2, 0.5), 'line-list');
+            expect(depthStencil.depthBias).to.equal(0);
+            expect(depthStencil.depthBiasSlopeScale).to.equal(0);
+        });
+
+        it('does not translate the stencil functions', function () {
+            const stencilParams = new StencilParameters({ func: FUNC_LESS });
+            const depthStencil = getDepthStencil(DepthState.DEFAULT, 'triangle-list', true, true, stencilParams);
+            expect(depthStencil.stencilFront.compare).to.equal('less');
+            expect(depthStencil.stencilBack.compare).to.equal('less');
         });
 
     });

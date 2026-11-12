@@ -238,6 +238,18 @@ describe('GraphicsDevice', function () {
             expect(device.isReverseZ).to.equal(false);
         });
 
+        it('supplies the REVERSE_Z define to the shaders only when enabled', function () {
+            const canvas = document.createElement('canvas');
+
+            const device = new WebgpuGraphicsDevice(canvas, { reverseZ: true });
+            device.initCapsDefines();
+            expect(device.capsDefines.has('REVERSE_Z')).to.equal(true);
+
+            const standard = new WebgpuGraphicsDevice(canvas, {});
+            standard.initCapsDefines();
+            expect(standard.capsDefines.has('REVERSE_Z')).to.equal(false);
+        });
+
     });
 
 });
