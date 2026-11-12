@@ -3,6 +3,7 @@ import { expect } from 'chai';
 import { Color } from '../../../src/core/math/color.js';
 import { Vec2 } from '../../../src/core/math/vec2.js';
 import { Vec4 } from '../../../src/core/math/vec4.js';
+import { CameraFrame } from '../../../src/extras/render-passes/camera-frame.js';
 import { Application } from '../../../src/framework/application.js';
 import { Entity } from '../../../src/framework/entity.js';
 import { SceneDepthReader } from '../../../src/framework/graphics/scene-depth-reader.js';
@@ -10,7 +11,7 @@ import { CULLFACE_NONE, PIXELFORMAT_DEPTH, PIXELFORMAT_RGBA8 } from '../../../sr
 import { RenderTarget } from '../../../src/platform/graphics/render-target.js';
 import { Texture } from '../../../src/platform/graphics/texture.js';
 import {
-    FOG_LINEAR, SHADOW_PCF1_32F, SHADOW_PCF3_16F, SHADOW_PCF5_32F, SHADOW_PCSS_32F, SHADOW_VSM_16F,
+    FOG_LINEAR, SHADOW_PCF1_32F, SHADOW_PCF3_16F, SHADOW_PCF3_32F, SHADOW_PCF5_32F, SHADOW_PCSS_32F, SHADOW_VSM_16F,
     SHADOW_VSM_32F, TONEMAP_NONE
 } from '../../../src/scene/constants.js';
 import { PlaneGeometry } from '../../../src/scene/geometry/plane-geometry.js';
@@ -32,7 +33,7 @@ const HEIGHT = 64;
  *
  * @param {boolean} reverseZ - Whether the device uses reverse-z.
  * @param {(app: Application) => object} build - Builds the scene, and returns the options of the
- * camera rendering it.
+ * camera rendering it, and optionally a `frame` function creating a camera frame for the camera.
  * @param {(device: object) => object} [targetOptions] - Returns additional options of the render
  * target, for the graphics device.
  * @returns {Promise<Uint8Array|null>} The RGBA8 pixels, rows from the top, or null when the backend
@@ -58,6 +59,8 @@ const renderScene = async (reverseZ, build, targetOptions = () => ({})) => {
     camera.setPosition(...(cameraOptions.position ?? [0, 0, 0]));
     camera.lookAt(...(cameraOptions.target ?? [0, 0, -1]));
     app.root.addChild(camera);
+    const frame = cameraOptions.frame?.(app, camera.camera);
+    frame?.update();
 
     // the second frame renders with the shadows the first frame allocated
     app.render();
@@ -68,6 +71,7 @@ const renderScene = async (reverseZ, build, targetOptions = () => ({})) => {
         pixels = await colorBuffer.read(0, 0, WIDTH, HEIGHT, { renderTarget, immediate: true });
     }
 
+    frame?.destroy();
     renderTarget.destroyTextureBuffers();
     renderTarget.destroy();
     app.destroy();
@@ -321,6 +325,117 @@ describe('Reverse-z rendering', function () {
                     }
                 }
                 expect(hits).to.be.above(200);
+            }
+        });
+    }
+
+    // the combinations WebGPU supports: omni shadows only with the clustered lighting, and VSM shadows of
+    // local lights only without it
+    for (const [name, type, shadowType, clustered] of [
+        ['clustered spot PCF3', 'spot', SHADOW_PCF3_32F, true],
+        ['spot PCF3', 'spot', SHADOW_PCF3_32F, false],
+        ['spot VSM 16F', 'spot', SHADOW_VSM_16F, false],
+        ['clustered omni PCF3', 'omni', SHADOW_PCF3_32F, true]
+    ]) {
+        it(`renders the same ${name} shadow as the standard depth`, async function () {
+            const build = (app) => {
+                app.scene.clusteredLightingEnabled = clustered;
+                if (clustered) {
+                    // the shadow type of the clustered lights is a setting of the clustered lighting
+                    app.scene.lighting.shadowsEnabled = true;
+                    app.scene.lighting.shadowType = shadowType;
+                }
+                shadowScene(shadowType)(app);
+                app.root.findByName('Sun').destroy();
+
+                const light = new Entity('Light');
+                light.addComponent('light', {
+                    type,
+                    castShadows: true,
+                    shadowType,
+                    shadowResolution: 512,
+                    range: 30,
+                    innerConeAngle: 40,
+                    outerConeAngle: 45,
+                    intensity: 2
+                });
+                light.setPosition(0, 6, -5);
+                light.setEulerAngles(-40, 0, 0);
+                app.root.addChild(light);
+                return { position: [0, 7, 7], target: [0, 0, 0], camera: { nearClip: 0.1, farClip: 100 } };
+            };
+            const standard = await renderScene(false, build);
+            const reversed = await renderScene(true, build);
+            if (executesGpuWork) {
+                expect(meanDifference(standard, reversed)).to.be.below(1);
+                expect(countDark(standard)).to.be.above(300);
+            }
+        });
+    }
+
+    it('draws the skybox behind the scene, as with the standard depth', async function () {
+        const build = (app) => {
+            // a cubemap of a single color for each face
+            const faceColors = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0], [0, 255, 255], [255, 0, 255]];
+            const faces = faceColors.map((color) => {
+                const data = new Uint8Array(4 * 4 * 4);
+                for (let i = 0; i < 16; i++) {
+                    data.set([...color, 255], i * 4);
+                }
+                return data;
+            });
+            app.scene.skybox = new Texture(app.graphicsDevice, {
+                name: 'Sky', cubemap: true, width: 4, height: 4, format: PIXELFORMAT_RGBA8, mipmaps: false, levels: [faces]
+            });
+
+            const box = new Entity('Box');
+            box.addComponent('render', { type: 'box', material: createMaterial(Color.WHITE, false) });
+            box.setPosition(0, 0, -5);
+            app.root.addChild(box);
+            return { camera: { nearClip: 0.5, farClip: 20 } };
+        };
+        const standard = await renderScene(false, build);
+        const reversed = await renderScene(true, build);
+        if (executesGpuWork) {
+            // the box in the center, the sky around it
+            expect(pixelAt(reversed, 32, 32)).to.deep.equal([255, 255, 255]);
+            expect(pixelAt(reversed, 2, 2)).to.not.deep.equal([0, 0, 0]);
+            expect(meanDifference(standard, reversed)).to.be.below(1);
+        }
+    });
+
+    for (const [name, shadowType] of [['PCF3', SHADOW_PCF3_32F], ['VSM 16F', SHADOW_VSM_16F], ['PCSS', SHADOW_PCSS_32F]]) {
+        it(`renders the same volumetric fog with a ${name} shadow as the standard depth`, async function () {
+            const build = (app) => {
+                const camera = shadowScene(shadowType)(app);
+                const spot = new Entity('Spot');
+                spot.addComponent('light', {
+                    type: 'spot', castShadows: true, range: 20, innerConeAngle: 20, outerConeAngle: 25, intensity: 3
+                });
+                spot.setPosition(3, 6, 0);
+                // tilted, as a surface facing the light head-on with the default biases is on the
+                // edge of shadowing itself, on which the rounding of either convention can fall
+                spot.setEulerAngles(-30, 0, 0);
+                app.root.addChild(spot);
+
+                camera.frame = (app, cameraComponent) => {
+                    const frame = new CameraFrame(app, cameraComponent);
+                    frame.rendering.toneMapping = TONEMAP_NONE;
+                    frame.volumetricFog.enabled = true;
+                    frame.volumetricFog.light = app.root.findByName('Sun').light;
+                    frame.volumetricFog.localSpotLights = true;
+                    frame.volumetricFog.density = 0.05;
+                    frame.volumetricFog.intensity = 2;
+                    frame.volumetricFog.heightBase = 10;
+                    return frame;
+                };
+                return camera;
+            };
+            const standard = await renderScene(false, build);
+            const reversed = await renderScene(true, build);
+            if (executesGpuWork) {
+                // the scattering is a small part of the image, so the bound is tight
+                expect(meanDifference(standard, reversed)).to.be.below(0.2);
             }
         });
     }
