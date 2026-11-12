@@ -18,20 +18,38 @@
 // Linear view depth (used for fog / overdraw / prepass) is reconstructed from
 // clipPos via the clipToViewZ uniform = -inverse(matrix_projection)[row 2].
 // This is correct for both perspective and orthographic projections; for
-// perspective it collapses to clip.w, matching the previous behaviour exactly.
+// perspective it collapses to clip.w, matching the previous behavior exactly.
 export default /* wgsl */`
 
 #include "gsplatHelpersVS"
 #include "gsplatOutputVS"
 
+#ifdef GSPLAT_USER_VARYINGS
+    #include "gsplatUserVaryingsVS"
+#endif
+
 attribute vertex_position: vec3f;
 
 uniform viewport_size: vec4f;
+
+// The cache stores canonical (unflipped) clip positions - this per-pass +-1 uniform, set by the
+// renderer from the render target's flipY, applies the target's vertical orientation to the
+// final position only. This keeps the projector cache valid for any raster target (forward,
+// prepass, pick), with the flip resolved at rasterization time.
+uniform projectionFlipY: f32;
 
 // -inverse(matrix_projection)[row 2]; lets the VS reconstruct linear view
 // depth from clipPos via dot(clipToViewZ, clip). Set per-camera by the
 // renderer (see GSplatHybridRenderer).
 uniform clipToViewZ: vec4f;
+
+#ifdef GSPLAT_XR
+    // Stereo: the cache stores per-eye NDC.xy plus a shared w; the active eye is selected by the
+    // per-view uniform view_index, and clip.z is reconstructed from w via matrix_projection.
+    // Both come from the per-view (BINDGROUP_VIEW) uniform buffer, set per eye by the renderer.
+    uniform view_index: u32;
+    uniform matrix_projection: mat4x4f;
+#endif
 
 #if defined(SHADOW_PASS) || defined(PICK_PASS) || defined(PREPASS_PASS)
     uniform alphaClip: f32;
@@ -49,18 +67,21 @@ var<storage, read> projCache: array<u32>;
 var<storage, read> numSplatsStorage: array<u32>;
 
 varying gaussianUV: half2;
-varying gaussianColor: half4;
+varying @interpolate(flat, either) gaussianColor: half4;
 
-#ifndef DITHER_NONE
-    varying id: f32;
+// Must match the fragment side exactly (see gsplatPS) - the dither id is the only consumer.
+#if defined(GSPLAT_STOCHASTIC) && !defined(DITHER_NONE)
+    varying @interpolate(flat, either) stochasticId: u32;
+#elif !defined(DITHER_NONE)
+    varying @interpolate(flat, either) id: f32;
 #endif
 
-#ifdef PREPASS_PASS
-    varying vLinearDepth: f32;
+#if defined(PREPASS_PASS) || defined(SCENE_TEXTURE_DEPTH)
+    varying @interpolate(flat, either) vLinearDepth: f32;
 #endif
 
 #if defined(GSPLAT_UNIFIED_ID) && defined(PICK_PASS)
-    varying @interpolate(flat) vPickId: u32;
+    varying @interpolate(flat, either) vPickId: u32;
 #endif
 
 #ifdef GSPLAT_OVERDRAW
@@ -75,7 +96,7 @@ const discardVec: vec4f = vec4f(0.0, 0.0, 2.0, 1.0);
 fn vertexMain(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
 
-    // Same instance/quad linearisation as gsplatSourceVS:
+    // Same instance/quad linearization as gsplatSourceVS:
     // order = instanceIdx * GSPLAT_INSTANCE_SIZE + perInstanceQuadIdx.
     let order = pcInstanceIndex * {GSPLAT_INSTANCE_SIZE}u + u32(vertex_position.z);
 
@@ -85,33 +106,67 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
         return output;
     }
 
-    let cacheIdx = sortedIndices[order];
+    // The cache index follows the data layout: a stochastic view ran no sort, so the cache is
+    // consumed in compacted order and sortedIndices carries stable splat IDs instead.
+    #ifdef GSPLAT_STOCHASTIC
+        let cacheIdx = order;
+        #ifndef DITHER_NONE
+            output.stochasticId = sortedIndices[order];
+        #endif
+    #else
+        let cacheIdx = sortedIndices[order];
+    #endif
     let base = cacheIdx * {CACHE_STRIDE}u;
 
-    let proj = vec4f(
-        bitcast<f32>(projCache[base + 0u]),
-        bitcast<f32>(projCache[base + 1u]),
-        bitcast<f32>(projCache[base + 2u]),
-        bitcast<f32>(projCache[base + 3u])
-    );
-    let v1 = unpack2x16float(projCache[base + 4u]);
-    let v2 = unpack2x16float(projCache[base + 5u]);
+    #ifdef GSPLAT_XR
+        // Stereo layout: pick this eye's NDC.xy ([0,1] eye 0 / [2,3] eye 1), shared w/v1/v2/color.
+        let off = uniform.view_index * 2u;
+        let ndc = vec2f(
+            bitcast<f32>(projCache[base + off + 0u]),
+            bitcast<f32>(projCache[base + off + 1u])
+        );
+        let w = bitcast<f32>(projCache[base + 4u]);
 
-    // Color / opacity / pickId: slot 6 is either packed (rg) or a raw u32 pcId.
-    let ba = unpack2x16float(projCache[base + 7u]);
-    let alpha = half(ba.y);
+        // Reconstruct clip.z from the shared w (perspective only). With P column-major:
+        //   clip.z = (P[2][2] / P[2][3]) * w + P[3][2]   (P[2][3] is the w-row z term)
+        // The z-row entries are identical for both eyes (same near/far), so this is eye-consistent.
+        let pz = (uniform.matrix_projection[2][2] / uniform.matrix_projection[2][3]) * w + uniform.matrix_projection[3][2];
 
-    #if defined(GSPLAT_UNIFIED_ID) && defined(PICK_PASS)
-        let pickId = projCache[base + 6u];
-    #endif
+        let proj = vec4f(ndc * w, clamp(pz, 0.0, abs(w)), w);
+        let v1 = unpack2x16float(projCache[base + 5u]);
+        let v2 = unpack2x16float(projCache[base + 6u]);
 
-    #ifdef PICK_PASS
-        // In the pick path slot 6 is repurposed as the picking ID; alpha is the only
-        // colour we care about in the FS gate. Slot 7's r channel is unused.
-        var clr: half4 = half4(half(0.0), half(0.0), half(0.0), alpha);
+        let rgba = unpack4x8unorm(projCache[base + 7u]);
+        // alpha is cached as the SOG v3 opacity byte, (1.25 * v)^2 (see the projector)
+        let alphaRoot = 1.25 * rgba.a;
+        let alpha = half(alphaRoot * alphaRoot);
+        var clr: half4 = half4(half(rgba.r), half(rgba.g), half(rgba.b), alpha);
     #else
-        let rg = unpack2x16float(projCache[base + 6u]);
-        var clr: half4 = half4(half(rg.x), half(rg.y), half(ba.x), alpha);
+        let proj = vec4f(
+            bitcast<f32>(projCache[base + 0u]),
+            bitcast<f32>(projCache[base + 1u]),
+            bitcast<f32>(projCache[base + 2u]),
+            bitcast<f32>(projCache[base + 3u])
+        );
+        let v1 = unpack2x16float(projCache[base + 4u]);
+        let v2 = unpack2x16float(projCache[base + 5u]);
+
+        // Color / opacity / pickId: slot 6 is either packed (rg) or a raw u32 pcId.
+        let ba = unpack2x16float(projCache[base + 7u]);
+        let alpha = half(ba.y);
+
+        #if defined(GSPLAT_UNIFIED_ID) && defined(PICK_PASS)
+            let pickId = projCache[base + 6u];
+        #endif
+
+        #ifdef PICK_PASS
+            // In the pick path slot 6 is repurposed as the picking ID; alpha is the only
+            // color we care about in the FS gate. Slot 7's r channel is unused.
+            var clr: half4 = half4(half(0.0), half(0.0), half(0.0), alpha);
+        #else
+            let rg = unpack2x16float(projCache[base + 6u]);
+            var clr: half4 = half4(half(rg.x), half(rg.y), half(ba.x), alpha);
+        #endif
     #endif
 
     // clipCorner: shrink the quad to exclude near-zero alpha regions (matches gsplatCommonVS per-pass threshold).
@@ -121,8 +176,17 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
     #else
         let alphaClipValue = half(uniform.alphaClipForward);
     #endif
-    let clip = min(half(1.0), sqrt(max(half(0.0), log(alpha / alphaClipValue))) * half(0.5));
-    let cornerClipped = cornerUV * f32(clip);
+    var clip = f32(min(half(1.0), sqrt(max(half(0.0), log(min(alpha, half(1.0)) / alphaClipValue))) * half(0.5)));
+
+    // over-unity opacity (see gsplatHelpersVS): above 1, the alpha passed to the fragment shader is
+    // 1 + the core radius instead, drawn with peak alpha 1, and the plain trim is stretched past the core
+    var shapeAlpha = alpha;
+    if (alpha > half(1.0)) {
+        let core = gsplatPlateauCore(f32(alpha));
+        clip = core + (1.0 - core) * clip;
+        shapeAlpha = half(1.0 + core);
+    }
+    let cornerClipped = cornerUV * clip;
 
     // Convert pixel-space offset into clip-space. proj.w is the real clipPos.w,
     // so c == clip.w / viewport matches gsplatCorner.js line 97 for both
@@ -131,34 +195,47 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
     let pixelOffset = cornerClipped.x * v1 + cornerClipped.y * v2;
     let clipOffset = pixelOffset * c;
 
-    output.position = proj + vec4f(clipOffset, 0.0, 0.0);
+    // flipping the final position (center + offset together) vertically mirrors the whole splat,
+    // which is the correct application of the target orientation to the canonical cached data
+    let pos = proj + vec4f(clipOffset, 0.0, 0.0);
+    output.position = vec4f(pos.x, pos.y * uniform.projectionFlipY, pos.z, pos.w);
     output.gaussianUV = half2(cornerClipped);
+
+    // read user varying values from the projection cache and pass them to the outputs
+    #ifdef GSPLAT_USER_VARYINGS
+        #include "gsplatUserCacheReadVS"
+    #endif
 
     // Reconstruct linear view depth from clip via the per-camera clipToViewZ
     // uniform = -inverse(matrix_projection)[row 2]. For perspective this
     // collapses to clip.w; for ortho it produces the correct -view.z. Used by
     // fog/overdraw/prepass below.
-    let viewDepth = dot(uniform.clipToViewZ, proj);
+    #ifdef GSPLAT_XR
+        // XR is perspective-only, so linear view depth is exactly the shared w (= -view.z).
+        let viewDepth = proj.w;
+    #else
+        let viewDepth = dot(uniform.clipToViewZ, proj);
+    #endif
 
     #ifdef GSPLAT_OVERDRAW
-        // Overdraw mode renders a flat colour ramp; depth-shade input not needed.
+        // Overdraw mode renders a flat color ramp; depth-shade input not needed.
         let t: f32 = clamp(viewDepth / 20.0, 0.0, 1.0);
         let rampColor: vec3f = textureSampleLevel(colorRamp, colorRampSampler, vec2f(t, 0.5), 0.0).rgb;
-        let outAlpha = alpha * half(1.0 / 32.0) * half(uniform.colorRampIntensity);
+        let outAlpha = min(alpha, half(1.0)) * half(1.0 / 32.0) * half(uniform.colorRampIntensity);
         output.gaussianColor = half4(half3(rampColor), outAlpha);
     #else
         output.gaussianColor = half4(
             half3(prepareOutputFromGamma(max(vec3f(clr.xyz), vec3f(0.0)), viewDepth)),
-            alpha
+            shapeAlpha
         );
     #endif
 
-    #ifndef DITHER_NONE
+    #if !defined(DITHER_NONE) && !defined(GSPLAT_STOCHASTIC)
         // Best-effort id from the cache index — used only for blue-noise dither.
         output.id = f32(cacheIdx);
     #endif
 
-    #ifdef PREPASS_PASS
+    #if defined(PREPASS_PASS) || defined(SCENE_TEXTURE_DEPTH)
         output.vLinearDepth = viewDepth;
     #endif
 

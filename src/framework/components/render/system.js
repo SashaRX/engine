@@ -1,18 +1,29 @@
 import { Vec3 } from '../../../core/math/vec3.js';
 import { BoundingBox } from '../../../core/shape/bounding-box.js';
 import { getDefaultMaterial } from '../../../scene/materials/default-material.js';
-import { Component } from '../component.js';
 import { ComponentSystem } from '../system.js';
 import { RenderComponent } from './component.js';
-import { RenderComponentData } from './data.js';
 
 /**
  * @import { AppBase } from '../../app-base.js'
+ * @import { Entity } from '../../entity.js'
  */
 
-const _schema = [
-    'enabled'
-];
+/**
+ * Options of the `render` component accepted by {@link RenderComponentSystem} that differ from the
+ * properties of {@link RenderComponent}. Each replaces the same-named property of the options that
+ * {@link Entity#addComponent} derives from the component class; see
+ * {@link ComponentOptionsOverrides}.
+ *
+ * @typedef {object} RenderComponentOptionsOverrides
+ * @property {number[]} [aabbCenter] - Center `[x, y, z]` of a custom bounding box; with
+ * `aabbHalfExtents`, sets {@link RenderComponent#customAabb}.
+ * @property {number[]} [aabbHalfExtents] - Half-extents `[x, y, z]` of a custom bounding box; with
+ * `aabbCenter`, sets {@link RenderComponent#customAabb}.
+ * @property {number | null} [batchGroupId] - Same as {@link RenderComponent#batchGroupId}. `null`
+ * selects no batch group.
+ * @ignore
+ */
 
 // order matters here
 const _properties = [
@@ -21,7 +32,10 @@ const _properties = [
     'asset',
     'materialAssets',
     'castShadows',
+    'shadowCascadeMask',
     'receiveShadows',
+    'clippingPlanes',
+    'clipIntersection',
     'castShadowsLightmap',
     'lightmapped',
     'lightmapSizeMultiplier',
@@ -52,12 +66,13 @@ class RenderComponentSystem extends ComponentSystem {
         this.id = 'render';
 
         this.ComponentType = RenderComponent;
-        this.DataType = RenderComponentData;
 
-        this.schema = _schema;
+        // consumed to build customAabb, not settable component properties
+        this.extraDataProperties = ['aabbCenter', 'aabbHalfExtents'];
+
         this.defaultMaterial = getDefaultMaterial(app.graphicsDevice);
 
-        this.on('beforeremove', this.onRemove, this);
+        this.on('beforeremove', this.onBeforeRemove, this);
     }
 
     initializeComponentData(component, _data, properties) {
@@ -80,16 +95,21 @@ class RenderComponentSystem extends ComponentSystem {
             component.customAabb = new BoundingBox(new Vec3(_data.aabbCenter), new Vec3(_data.aabbHalfExtents));
         }
 
-        super.initializeComponentData(component, _data, _schema);
+        super.initializeComponentData(component, _data);
     }
 
     cloneComponent(entity, clone) {
 
-        // copy properties
+        // copy properties, and the clipping planes as assigned, without changes to the returned
+        // planes that are not assigned
         const data = {};
         for (let i = 0; i < _properties.length; i++) {
-            data[_properties[i]] = entity.render[_properties[i]];
+            const property = _properties[i];
+            if (property !== 'clippingPlanes') {
+                data[property] = entity.render[property];
+            }
         }
+        data.clippingPlanes = entity.render._clipPlanes?.assigned ?? null;
         data.enabled = entity.render.enabled;
 
         // mesh instances cannot be used this way, remove them and manually clone them later
@@ -115,11 +135,9 @@ class RenderComponentSystem extends ComponentSystem {
         return component;
     }
 
-    onRemove(entity, component) {
-        component.onRemove();
+    onBeforeRemove(entity, component) {
+        component.onBeforeRemove();
     }
 }
-
-Component._buildAccessors(RenderComponent.prototype, _schema);
 
 export { RenderComponentSystem };

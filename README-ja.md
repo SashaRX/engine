@@ -7,14 +7,14 @@
 [![Reddit](https://img.shields.io/badge/Reddit-FF4500?style=flat&logo=reddit&logoColor=white&color=black)](https://www.reddit.com/r/PlayCanvas)
 [![X](https://img.shields.io/badge/X-000000?style=flat&logo=x&logoColor=white&color=black)](https://x.com/intent/follow?screen_name=playcanvas)
 
-| [ユーザーマニュアル](https://developer.playcanvas.com/user-manual/engine/) | [APIリファレンス](https://api.playcanvas.com/engine/) | [例](https://playcanvas.github.io) | [ブログ](https://blog.playcanvas.com) | [フォーラム](https://forum.playcanvas.com) |
+| [ユーザーマニュアル](https://developer.playcanvas.com/user-manual/engine/) | [APIリファレンス](https://api.playcanvas.com/engine/) | [例](https://playcanvas.com/examples/) | [ブログ](https://blog.playcanvas.com) | [フォーラム](https://forum.playcanvas.com) |
 
 PlayCanvasは、WebGL2とWebGPU上に構築されたオープンソースのゲームエンジンです。あらゆるブラウザ、あらゆるデバイスで動作するインタラクティブな3Dアプリ、ゲーム、ビジュアライゼーションを作成できます。
 
-[English](https://github.com/playcanvas/engine/blob/dev/README.md)
-[中文](https://github.com/playcanvas/engine/blob/dev/README-zh.md)
-[日本語](https://github.com/playcanvas/engine/blob/dev/README-ja.md)
-[한글](https://github.com/playcanvas/engine/blob/dev/README-kr.md)
+[English](https://github.com/playcanvas/engine/blob/main/README.md)
+[中文](https://github.com/playcanvas/engine/blob/main/README-zh.md)
+[日本語](https://github.com/playcanvas/engine/blob/main/README-ja.md)
+[한글](https://github.com/playcanvas/engine/blob/main/README-kr.md)
 
 ## インストール
 
@@ -97,6 +97,10 @@ PlayCanvasはフル機能のゲームエンジンです。
 * 🔊 **サウンド** - Web Audio APIを利用した3D位置情報サウンド
 * 📦 **アセット** - [glTF 2.0](https://www.khronos.org/gltf/)、[Draco](https://google.github.io/draco/)、[Basis](https://github.com/BinomialLLC/basis_universal) の圧縮技術を利用した非同期型ストリーミングシステム
 * 📜 **スクリプト** - TypeScriptとJavaScriptをサポート
+
+## AIを使った開発
+
+コーディングエージェントは、[Engineガイドのインデックス](https://developer.playcanvas.com/user-manual/engine/llms.txt)と[Engine APIのインデックス](https://api.playcanvas.com/engine/llms.txt)から始めてください。どちらも各ページのMarkdown版にリンクしています。プロジェクトでエージェントを設定する方法は、[Developing with AI](https://developer.playcanvas.com/user-manual/engine/developing-with-ai/)で説明しています。
 
 ## エコシステム
 

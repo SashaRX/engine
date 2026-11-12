@@ -17,21 +17,21 @@ class TextureAtlas extends EventHandler {
      * Create a new TextureAtlas instance.
      *
      * @example
-     * const atlas = new pc.TextureAtlas();
+     * const atlas = new TextureAtlas();
      * atlas.frames = {
      *     '0': {
      *         // rect has u, v, width and height in pixels
-     *         rect: new pc.Vec4(0, 0, 256, 256),
+     *         rect: new Vec4(0, 0, 256, 256),
      *         // pivot has x, y values between 0-1 which define the point
      *         // within the frame around which rotation and scale is calculated
-     *         pivot: new pc.Vec2(0.5, 0.5),
+     *         pivot: new Vec2(0.5, 0.5),
      *         // border has left, bottom, right and top in pixels defining regions for 9-slicing
-     *         border: new pc.Vec4(5, 5, 5, 5)
+     *         border: new Vec4(5, 5, 5, 5)
      *     },
      *     '1': {
-     *         rect: new pc.Vec4(256, 0, 256, 256),
-     *         pivot: new pc.Vec2(0.5, 0.5),
-     *         border: new pc.Vec4(5, 5, 5, 5)
+     *         rect: new Vec4(256, 0, 256, 256),
+     *         pivot: new Vec2(0.5, 0.5),
+     *         border: new Vec4(5, 5, 5, 5)
      *     }
      * };
      */
@@ -94,14 +94,16 @@ class TextureAtlas extends EventHandler {
      * @param {string} key - The key of the frame.
      * @param {object} data - The properties of the frame.
      * @param {Vec4} data.rect - The u, v, width, height properties of the frame in pixels.
-     * @param {Vec2} data.pivot - The pivot of the frame - values are between 0-1.
+     * @param {Vec2} data.pivot - The pivot of the frame - values are usually between 0-1. Values
+     * outside that range place the pivot outside the frame, such as for a frame trimmed from a
+     * larger sprite.
      * @param {Vec4} data.border - The border of the frame for 9-slicing. Values are ordered as
      * follows: left, bottom, right, top border in pixels.
      * @example
      * atlas.setFrame('1', {
-     *     rect: new pc.Vec4(0, 0, 128, 128),
-     *     pivot: new pc.Vec2(0.5, 0.5),
-     *     border: new pc.Vec4(5, 5, 5, 5)
+     *     rect: new Vec4(0, 0, 128, 128),
+     *     pivot: new Vec2(0.5, 0.5),
+     *     border: new Vec4(5, 5, 5, 5)
      * });
      */
     setFrame(key, data) {

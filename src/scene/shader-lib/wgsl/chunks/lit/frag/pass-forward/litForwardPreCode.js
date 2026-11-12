@@ -16,13 +16,19 @@ export default /* wgsl */`
     #include "baseNineSlicedTiledPS"
 #endif
 
+// flat shading
+#ifdef FLAT_SHADING
+    #include "flatNormalPS"
+#endif
+
 // TBN
 #ifdef LIT_TBN
     #include "TBNPS"
+#endif
 
-    #ifdef LIT_TWO_SIDED_LIGHTING
-        #include "twoSidedLightingPS"
-    #endif
+// two sided lighting
+#ifdef LIT_NEEDS_NORMAL
+    #include "twoSidedLightingPS"
 #endif
 
 `;

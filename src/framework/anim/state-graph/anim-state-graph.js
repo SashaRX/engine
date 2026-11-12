@@ -1,11 +1,17 @@
 /**
  * An asset resource which represents an anim state graph. It can be loaded into an anim component using the {@link AnimComponent#loadStateGraph} method.
  *
+ * The graph is data, not behavior. It lists its `layers`, each with its states, the
+ * transitions between them and their conditions, and the `parameters` those conditions read.
+ * Loading it into a component builds the runtime {@link AnimState}, {@link AnimTransition} and
+ * {@link AnimBlendTree} objects, and {@link AnimComponent#assignAnimation} then attaches an
+ * {@link AnimTrack} to each state. One graph can drive any number of components.
+ *
  * ## Usage
  * Scripts can retrieve an AnimStateGraph instance from assets of type 'animstategraph'. An AnimStateGraph can then be loaded into an anim component as follows:
  * ```javascript
  * const animStateGraph = app.assets.get(ASSET_ID).resource;
- * const entity = new pc.Entity();
+ * const entity = new Entity();
  * entity.addComponent('anim');
  * entity.anim.loadStateGraph(animStateGraph);
  * ```

@@ -16,6 +16,26 @@ import { RenderAction } from './render-action.js';
  * Layer Composition is a collection of {@link Layer} that is fed to {@link Scene#layers} to define
  * rendering order.
  *
+ * Each layer is rendered as two parts, its opaque mesh instances and its transparent ones, and
+ * {@link layerList} holds the sequence of parts in the order they are drawn. {@link push} and
+ * {@link insert} add both parts of a layer together, while {@link pushOpaque},
+ * {@link pushTransparent}, {@link insertOpaque} and {@link insertTransparent} place one part at a
+ * time, which is how the default composition places the depth and skybox layers between the world's
+ * opaque and transparent parts. Look layers up with {@link getLayerById} and
+ * {@link getLayerByName}, find where a part sits with {@link getOpaqueIndex} and
+ * {@link getTransparentIndex}, and take a layer out with {@link remove}. The composition fires
+ * `add` and `remove` as layers come and go.
+ *
+ * The composition the application creates ends with the UI layer, so a pushed layer renders after
+ * the UI and outside the range a camera's post-processing applies to. To render inside that range,
+ * insert at an index taken from {@link getOpaqueIndex} or {@link getTransparentIndex}.
+ *
+ * @example
+ * // Draw decals right after the world's opaque objects and before its transparent ones
+ * const layers = app.scene.layers;
+ * const world = layers.getLayerById(LAYERID_WORLD);
+ * const decals = new Layer({ name: 'Decals' });
+ * layers.insertOpaque(decals, layers.getOpaqueIndex(world) + 1);
  * @category Graphics
  */
 class LayerComposition extends EventHandler {
@@ -123,15 +143,6 @@ class LayerComposition extends EventHandler {
         this._transparentOrder = {};
     }
 
-    destroy() {
-        this.destroyRenderActions();
-    }
-
-    destroyRenderActions() {
-        this._renderActions.forEach(ra => ra.destroy());
-        this._renderActions.length = 0;
-    }
-
     markDirty() {
         this._dirty = true;
     }
@@ -180,7 +191,7 @@ class LayerComposition extends EventHandler {
 
             // render in order of cameras sorted by priority
             let renderActionCount = 0;
-            this.destroyRenderActions();
+            this._renderActions.length = 0;
 
             for (let i = 0; i < this.cameras.length; i++) {
                 const camera = this.cameras[i];
@@ -384,8 +395,6 @@ class LayerComposition extends EventHandler {
                         (enabled ? ' ENABLED ' : ' DISABLED') +
                         (` RT: ${ra.renderTarget ? ra.renderTarget.name : '-'}`).padEnd(30, ' ')
                     } Clear: ${clear
-                    }${ra.firstCameraUse ? ' CAM-FIRST' : ''
-                    }${ra.lastCameraUse ? ' CAM-LAST' : ''
                     }${ra.triggerPostprocess ? ' POSTPROCESS' : ''}`
                     );
                 }
@@ -413,6 +422,11 @@ class LayerComposition extends EventHandler {
 
     /**
      * Adds a layer (both opaque and semi-transparent parts) to the end of the {@link layerList}.
+     *
+     * The default composition ends with the UI layer, so a layer pushed here renders after the UI
+     * and after the last layer a camera's post-processing applies to. To place a layer inside the
+     * post-processed range instead, use {@link LayerComposition#insert} with an index from
+     * {@link LayerComposition#getOpaqueIndex}.
      *
      * @param {Layer} layer - A {@link Layer} to add.
      */
@@ -647,6 +661,21 @@ class LayerComposition extends EventHandler {
             }
         }
         return false;
+    }
+
+    /**
+     * Returns true if the sub-layer at the given flat {@link LayerComposition#layerList} index is
+     * enabled and rendered by the given camera. Combines the per-layer enabled flag, the per
+     * sub-layer enabled flag and the layer's set of cameras.
+     *
+     * @param {number} index - The index of the sub-layer in {@link LayerComposition#layerList}.
+     * @param {Camera} camera - The camera to test.
+     * @returns {boolean} True if the sub-layer is enabled and the camera renders it.
+     * @ignore
+     */
+    isSubLayerRenderedByCamera(index, camera) {
+        const layer = this.layerList[index];
+        return layer.enabled && this.subLayerEnabled[index] && layer.camerasSet.has(camera);
     }
 
     /**

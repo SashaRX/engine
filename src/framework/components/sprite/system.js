@@ -6,19 +6,35 @@ import {
 import { Texture } from '../../../platform/graphics/texture.js';
 import { BLEND_PREMULTIPLIED, SPRITE_RENDERMODE_SLICED, SPRITE_RENDERMODE_TILED } from '../../../scene/constants.js';
 import { StandardMaterial } from '../../../scene/materials/standard-material.js';
-import { Component } from '../component.js';
 import { ComponentSystem } from '../system.js';
 import { SpriteComponent } from './component.js';
-import { SpriteComponentData } from './data.js';
 
 /**
  * @import { AppBase } from '../../app-base.js'
+ * @import { Entity } from '../../entity.js'
+ * @import { SpriteAnimationClip } from './sprite-animation-clip.js'
  */
 
-const _schema = ['enabled'];
+/**
+ * Options of the `sprite` component accepted by {@link SpriteComponentSystem} that differ from the
+ * properties of {@link SpriteComponent}. Each replaces the same-named property of the options that
+ * {@link Entity#addComponent} derives from the component class; see
+ * {@link ComponentOptionsOverrides}.
+ *
+ * @typedef {object} SpriteComponentOptionsOverrides
+ * @property {number | null} [batchGroupId] - Same as {@link SpriteComponent#batchGroupId}. `null`
+ * selects no batch group.
+ * @property {{ [name: string]: SpriteAnimationClip | { name?: string, fps?: number, loop?: boolean, spriteAsset?: number } }} [clips] -
+ * Same as {@link SpriteComponent#clips}, also accepting the plain clip data of
+ * {@link SpriteComponent#addClip}.
+ * @property {Color | number[]} [color] - Same as {@link SpriteComponent#color}, also accepting an
+ * `[r, g, b]` array.
+ * @ignore
+ */
 
 /**
- * Manages creation of {@link SpriteComponent}s.
+ * Manages the {@link SpriteComponent}s of an application. Reach it through `app.systems.sprite`;
+ * components are created with {@link Entity#addComponent}, never by calling the system directly.
  *
  * @category Graphics
  */
@@ -35,9 +51,6 @@ class SpriteComponentSystem extends ComponentSystem {
         this.id = 'sprite';
 
         this.ComponentType = SpriteComponent;
-        this.DataType = SpriteComponentData;
-
-        this.schema = _schema;
 
         // default texture - make white so we can tint it with emissive color
         this._defaultTexture = null;
@@ -72,6 +85,8 @@ class SpriteComponentSystem extends ComponentSystem {
             texture.unlock();
 
             const material = new StandardMaterial();
+            // Sprite color is per-instance data, independent of the shared material uniforms.
+            material.setDefine('MESH_COLOR', true);
             material.diffuse.set(0, 0, 0); // black diffuse color to prevent ambient light being included
             material.emissive.set(1, 1, 1);
             material.emissiveMap = texture;
@@ -139,7 +154,9 @@ class SpriteComponentSystem extends ComponentSystem {
             component.enabled = data.enabled;
         }
 
-        component.type = data.type;
+        if (data.type !== undefined) {
+            component.type = data.type;
+        }
 
         if (data.layers && Array.isArray(data.layers)) {
             component.layers = data.layers.slice(0);
@@ -210,7 +227,8 @@ class SpriteComponentSystem extends ComponentSystem {
 
         component.batchGroupId = data.batchGroupId === undefined || data.batchGroupId === null ? -1 : data.batchGroupId;
 
-        super.initializeComponentData(component, data, properties);
+        // pass an empty properties list as the enabled state is initialized above
+        super.initializeComponentData(component, data, []);
     }
 
     cloneComponent(entity, clone) {
@@ -242,10 +260,10 @@ class SpriteComponentSystem extends ComponentSystem {
 
         for (const id in components) {
             if (components.hasOwnProperty(id)) {
-                const component = components[id];
+                const { entity } = components[id];
                 // if sprite component is enabled advance its current clip
-                if (component.data.enabled && component.entity.enabled) {
-                    const sprite = component.entity.sprite;
+                if (entity.sprite.enabled && entity.enabled) {
+                    const sprite = entity.sprite;
                     if (sprite._currentClip) {
                         sprite._currentClip._update(dt);
                     }
@@ -255,10 +273,8 @@ class SpriteComponentSystem extends ComponentSystem {
     }
 
     onBeforeRemove(entity, component) {
-        component.onDestroy();
+        component.onBeforeRemove();
     }
 }
-
-Component._buildAccessors(SpriteComponent.prototype, _schema);
 
 export { SpriteComponentSystem };

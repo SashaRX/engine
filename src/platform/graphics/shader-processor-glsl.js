@@ -5,13 +5,14 @@ import {
     SAMPLETYPE_FLOAT, SAMPLETYPE_DEPTH, SAMPLETYPE_UNFILTERABLE_FLOAT,
     TEXTUREDIMENSION_2D, TEXTUREDIMENSION_2D_ARRAY, TEXTUREDIMENSION_CUBE, TEXTUREDIMENSION_3D,
     TYPE_FLOAT32, TYPE_INT8, TYPE_INT16, TYPE_INT32, TYPE_FLOAT16, SAMPLETYPE_INT, SAMPLETYPE_UINT,
-    BINDGROUP_MESH_UB,
+    BINDGROUP_MESH_UB, BINDGROUP_VIEW,
     UNUSED_UNIFORM_NAME,
     UNIFORMTYPE_FLOAT,
     bindGroupNames
 } from './constants.js';
 import { UniformFormat, UniformBufferFormat } from './uniform-buffer-format.js';
 import { BindGroupFormat, BindTextureFormat } from './bind-group-format.js';
+import { getViewBindGroupFormat } from './view-bind-group-format.js';
 
 /**
  * @import { GraphicsDevice } from './graphics-device.js'
@@ -27,9 +28,6 @@ const KEYWORD = /[ \t]*(\battribute\b|\bvarying\b|\buniform\b)/g;
 // match 'attribute' and anything else till ';'
 // eslint-disable-next-line regexp/no-unused-capturing-group, regexp/no-super-linear-backtracking
 const KEYWORD_LINE = /(\battribute\b|\bvarying\b|\bout\b|\buniform\b)[ \t]*([^;]+)(;+)/g;
-
-// marker for a place in the source code to be replaced by code
-const MARKER = '@@@';
 
 // an array identifier, for example 'data[4]' - group 1 is 'data', group 2 is everything in brackets: '4'
 const ARRAY_IDENTIFIER = /([\w-]+)\[(.*?)\]/;
@@ -103,6 +101,12 @@ class UniformLine {
             this.arraySize = 0;
         }
 
+        Debug.call(() => {
+            if (this.name === 'uScreenSize') {
+                Debug.deprecated('Shader uniform uScreenSize is deprecated. Use screen_size instead.');
+            }
+        });
+
         this.isSampler = this.type.indexOf('sampler') !== -1;
         this.isSignedInt = this.type.indexOf('isampler') !== -1;
         this.isUnsignedInt = this.type.indexOf('usampler') !== -1;
@@ -114,6 +118,14 @@ class UniformLine {
  * attributes, and handles conversion of uniforms to uniform buffers.
  */
 class ShaderProcessorGLSL {
+    /**
+     * Marker for the place in the source code where generated code blocks are injected. Shared with
+     * subclasses (e.g. the WebGL2 processor) so the marker is defined in one place.
+     *
+     * @type {string}
+     */
+    static MARKER = '@@@';
+
     /**
      * Process the shader.
      *
@@ -165,23 +177,26 @@ class ShaderProcessorGLSL {
 
         // VS - insert the blocks to the source
         const vBlock = `${attributesBlock}\n${vertexVaryingsBlock}\n${uniformsData.code}`;
-        const vshader = vertexExtracted.src.replace(MARKER, vBlock);
+        const vshader = vertexExtracted.src.replace(ShaderProcessorGLSL.MARKER, vBlock);
 
         // FS - insert the blocks to the source
         const fBlock = `${fragmentVaryingsBlock}\n${outBlock}\n${uniformsData.code}`;
-        const fshader = fragmentExtracted.src.replace(MARKER, fBlock);
+        const fshader = fragmentExtracted.src.replace(ShaderProcessorGLSL.MARKER, fBlock);
 
         return {
             vshader: vshader,
             fshader: fshader,
             attributes: attributesMap,
             meshUniformBufferFormat: uniformsData.meshUniformBufferFormat,
-            meshBindGroupFormat: uniformsData.meshBindGroupFormat
+            meshBindGroupFormat: uniformsData.meshBindGroupFormat,
+            viewBindGroupFormat: uniformsData.viewBindGroupFormat
         };
     }
 
-    // Extract required information from the shader source code.
-    static extract(src) {
+    // Extract required information from the shader source code. When uniformsOnly is true, only
+    // 'uniform' lines are extracted - attributes and varyings are left in the source unchanged (the
+    // WebGL2 path relies on the gles3 compatibility macros to handle those).
+    static extract(src, uniformsOnly = false) {
 
         // collected data
         const attributes = [];
@@ -191,13 +206,19 @@ class ShaderProcessorGLSL {
 
         // replacement marker - mark a first replacement place, this is where code
         // blocks are injected later
-        let replacement = `${MARKER}\n`;
+        let replacement = `${ShaderProcessorGLSL.MARKER}\n`;
 
         // extract relevant parts of the shader
         let match;
         while ((match = KEYWORD.exec(src)) !== null) {
 
             const keyword = match[1];
+
+            // in uniforms-only mode, leave attribute / varying lines untouched
+            if (uniformsOnly && keyword !== 'uniform') {
+                continue;
+            }
+
             switch (keyword) {
                 case 'attribute':
                 case 'varying':
@@ -239,6 +260,18 @@ class ShaderProcessorGLSL {
     }
 
     /**
+     * Parse extracted uniform lines into {@link UniformLine} instances. Exposed so subclasses (e.g.
+     * the WebGL2 processor) can reuse the parsing without needing access to the private UniformLine.
+     *
+     * @param {string[]} uniformLines - The uniform lines (bodies, without the 'uniform' keyword).
+     * @param {Shader} shader - The shader.
+     * @returns {Array<UniformLine>} The parsed uniform lines.
+     */
+    static parseUniformLines(uniformLines, shader) {
+        return uniformLines.map(line => new UniformLine(line, shader));
+    }
+
+    /**
      * Process the lines with uniforms. The function receives the lines containing all uniforms,
      * both numerical as well as textures/samplers. The function also receives the format of uniform
      * buffers (numerical) and bind groups (textures) for view and material level. All uniforms that
@@ -273,6 +306,7 @@ class ShaderProcessorGLSL {
         uniformLinesNonSamplers.forEach((uniform) => {
             // uniforms not already in supplied uniform buffers go to the mesh buffer
             if (!processingOptions.hasUniform(uniform.name)) {
+                processingOptions.debugCheckMeshUniform(uniform.name);
                 const uniformType = uniformTypeToName.indexOf(uniform.type);
                 Debug.assert(uniformType >= 0, `Uniform type ${uniform.type} is not recognized on line [${uniform.line}]`);
                 const uniformFormat = new UniformFormat(uniform.name, uniformType, uniform.arraySize);
@@ -290,17 +324,22 @@ class ShaderProcessorGLSL {
             meshUniforms.push(new UniformFormat(UNUSED_UNIFORM_NAME, UNIFORMTYPE_FLOAT));
         }
 
-        const meshUniformBufferFormat = meshUniforms.length ? new UniformBufferFormat(device, meshUniforms) : null;
+        const meshUniformBufferFormat = meshUniforms.length ? new UniformBufferFormat(device, meshUniforms, { pack: true }) : null;
 
         // build mesh bind group format - this contains the textures, but not the uniform buffer as that is a separate binding
         const textureFormats = [];
+
+        // the textures the renderer supplies per pass, which go to the view bind group instead
+        const viewTextureFormats = [];
+        const viewTextures = processingOptions.viewTextures;
+
         uniformLinesSamplers.forEach((uniform) => {
             // unmatched texture uniforms go to mesh block
             if (!processingOptions.hasTexture(uniform.name)) {
 
                 // sample type
                 // WebGpu does not currently support filtered float format textures, and so we map them to unfilterable type
-                // as we sample them without filtering anyways
+                // as we sample them without filtering anyway
                 let sampleType = SAMPLETYPE_FLOAT;
                 if (uniform.isSignedInt) {
                     sampleType = SAMPLETYPE_INT;
@@ -319,13 +358,19 @@ class ShaderProcessorGLSL {
                 const dimension = textureDimensions[uniform.type];
 
                 // TODO: we could optimize visibility to only stages that use any of the data
-                textureFormats.push(new BindTextureFormat(uniform.name, SHADERSTAGE_VERTEX | SHADERSTAGE_FRAGMENT, dimension, sampleType));
+                const textureFormat = new BindTextureFormat(uniform.name, SHADERSTAGE_VERTEX | SHADERSTAGE_FRAGMENT, dimension, sampleType);
+                if (viewTextures?.has(uniform.name)) {
+                    viewTextureFormats.push(textureFormat);
+                } else {
+                    textureFormats.push(textureFormat);
+                }
             }
 
             // validate types in else
 
         });
         const meshBindGroupFormat = new BindGroupFormat(device, textureFormats);
+        const viewBindGroupFormat = viewTextureFormats.length ? getViewBindGroupFormat(device, viewTextureFormats) : null;
 
         // generate code for uniform buffers
         let code = '';
@@ -334,6 +379,11 @@ class ShaderProcessorGLSL {
                 code += ShaderProcessorGLSL.getUniformShaderDeclaration(format, bindGroupIndex, 0);
             }
         });
+
+        // the view textures follow the view uniform buffer in its bind group
+        if (viewBindGroupFormat) {
+            code += ShaderProcessorGLSL.getTexturesShaderDeclaration(viewBindGroupFormat, BINDGROUP_VIEW);
+        }
 
         // and also for generated mesh format, which is at the slot 0 of the bind group
         if (meshUniformBufferFormat) {
@@ -353,7 +403,8 @@ class ShaderProcessorGLSL {
         return {
             code,
             meshUniformBufferFormat,
-            meshBindGroupFormat
+            meshBindGroupFormat,
+            viewBindGroupFormat
         };
     }
 
@@ -509,4 +560,4 @@ class ShaderProcessorGLSL {
     }
 }
 
-export { ShaderProcessorGLSL };
+export { ShaderProcessorGLSL, UniformLine };

@@ -1,26 +1,32 @@
+import { Debug } from '../debug.js';
 import { math } from './math.js';
 
 /**
  * A 2-dimensional vector. Vec2 is commonly used to represent 2D positions, directions, texture
  * coordinates (UVs) or any pair of related numeric values.
  *
+ * Operations follow one convention throughout the math classes: a method that modifies the vector
+ * it is called on returns it, so calls can be chained and nothing is allocated, while queries such
+ * as {@link distance} and {@link dot} return a number. Two-operand forms such as {@link add2} and
+ * {@link sub2} write the result of `lhs op rhs` into `this`, and it is safe for `this` to also be
+ * one of the operands. Use {@link clone} for an independent copy and {@link copy} to overwrite one
+ * vector with another.
+ *
+ * The static constants such as {@link ZERO} and {@link UP} are frozen shared instances: read them
+ * freely, but writing to one throws. Copy a constant before modifying it.
+ *
+ * @example
+ * // Scroll a texture offset each frame without allocating
+ * const offset = new Vec2(0, 0);
+ * const speed = new Vec2(0.1, 0);
+ * offset.addScaled(speed, dt);
+ * @example
+ * // Chain mutating operations; each returns the vector it was called on
+ * const toTarget = new Vec2().sub2(target, position).normalize();
+ * const distance = target.distance(position);
  * @category Math
  */
 class Vec2 {
-    /**
-     * The first component of the vector.
-     *
-     * @type {number}
-     */
-    x;
-
-    /**
-     * The second component of the vector.
-     *
-     * @type {number}
-     */
-    y;
-
     /**
      * Creates a new Vec2 instance.
      *
@@ -28,8 +34,8 @@ class Vec2 {
      * @param {number} [x] - The x value. Defaults to 0.
      * @param {number} [y] - The y value. Defaults to 0.
      * @example
-     * const v1 = new pc.Vec2(); // defaults to 0, 0
-     * const v2 = new pc.Vec2(1, 2);
+     * const v1 = new Vec2(); // defaults to 0, 0
+     * const v2 = new Vec2(1, 2);
      */
     /**
      * Creates a new Vec2 instance.
@@ -37,7 +43,7 @@ class Vec2 {
      * @overload
      * @param {number[]} arr - The array to set the vector values from.
      * @example
-     * const v = new pc.Vec2([1, 2]);
+     * const v = new Vec2([1, 2]);
      */
     /**
      * @param {number|number[]} [x] - The x value. Defaults to 0. If x is an array of length 2, the
@@ -46,12 +52,27 @@ class Vec2 {
      */
     constructor(x = 0, y = 0) {
         if (x.length === 2) {
-            this.x = x[0];
-            this.y = x[1];
-        } else {
-            this.x = x;
-            this.y = y;
+            y = x[1];
+            x = x[0];
         }
+
+        // Fields are assigned once here instead of declared as class fields. A declaration without
+        // an initializer stores undefined first, so V8 never unboxes the field as a double and
+        // every fractional write allocates a heap number.
+
+        /**
+         * The first component of the vector.
+         *
+         * @type {number}
+         */
+        this.x = x;
+
+        /**
+         * The second component of the vector.
+         *
+         * @type {number}
+         */
+        this.y = y;
     }
 
     /**
@@ -60,8 +81,8 @@ class Vec2 {
      * @param {Vec2} rhs - The vector to add to the specified vector.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const a = new pc.Vec2(10, 10);
-     * const b = new pc.Vec2(20, 20);
+     * const a = new Vec2(10, 10);
+     * const b = new Vec2(20, 20);
      *
      * a.add(b);
      *
@@ -82,9 +103,9 @@ class Vec2 {
      * @param {Vec2} rhs - The second vector operand for the addition.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const a = new pc.Vec2(10, 10);
-     * const b = new pc.Vec2(20, 20);
-     * const r = new pc.Vec2();
+     * const a = new Vec2(10, 10);
+     * const b = new Vec2(20, 20);
+     * const r = new Vec2();
      *
      * r.add2(a, b);
      * // Outputs [30, 30]
@@ -104,7 +125,7 @@ class Vec2 {
      * @param {number} scalar - The number to add.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const vec = new pc.Vec2(3, 4);
+     * const vec = new Vec2(3, 4);
      *
      * vec.addScalar(2);
      *
@@ -125,9 +146,9 @@ class Vec2 {
      * @param {number} scalar - The number to multiply the added vector with.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const vec = new pc.Vec2(1, 2);
+     * const vec = new Vec2(1, 2);
      *
-     * vec.addScaled(pc.Vec2.UP, 2);
+     * vec.addScaled(Vec2.UP, 2);
      *
      * // Outputs [1, 4]
      * console.log("The result of the addition is: " + vec.toString());
@@ -144,7 +165,7 @@ class Vec2 {
      *
      * @returns {this} A 2-dimensional vector containing the result of the cloning.
      * @example
-     * const v = new pc.Vec2(10, 20);
+     * const v = new Vec2(10, 20);
      * const vclone = v.clone();
      * console.log("The result of the cloning is: " + vclone.toString());
      */
@@ -160,8 +181,8 @@ class Vec2 {
      * @param {Vec2} rhs - A vector to copy to the specified vector.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const src = new pc.Vec2(10, 20);
-     * const dst = new pc.Vec2();
+     * const src = new Vec2(10, 20);
+     * const dst = new Vec2();
      *
      * dst.copy(src);
      *
@@ -181,8 +202,8 @@ class Vec2 {
      * @param {Vec2} rhs - The second 2-dimensional vector operand of the cross product.
      * @returns {number} The cross product of the two vectors.
      * @example
-     * const right = new pc.Vec2(1, 0);
-     * const up = new pc.Vec2(0, 1);
+     * const right = new Vec2(1, 0);
+     * const up = new Vec2(0, 1);
      * const crossProduct = right.cross(up);
      *
      * // Prints 1
@@ -198,8 +219,8 @@ class Vec2 {
      * @param {Vec2} rhs - The second 2-dimensional vector to test.
      * @returns {number} The distance between the two vectors.
      * @example
-     * const v1 = new pc.Vec2(5, 10);
-     * const v2 = new pc.Vec2(10, 20);
+     * const v1 = new Vec2(5, 10);
+     * const v2 = new Vec2(10, 20);
      * const d = v1.distance(v2);
      * console.log("The distance between v1 and v2 is: " + d);
      */
@@ -210,13 +231,30 @@ class Vec2 {
     }
 
     /**
+     * Returns the squared distance between the two specified 2-dimensional vectors.
+     *
+     * @param {Vec2} rhs - The second 2-dimensional vector to test.
+     * @returns {number} The squared distance between the two vectors.
+     * @example
+     * const v1 = new Vec2(5, 10);
+     * const v2 = new Vec2(10, 20);
+     * const d = v1.distanceSq(v2);
+     * console.log("The squared distance between v1 and v2 is: " + d);
+     */
+    distanceSq(rhs) {
+        const x = this.x - rhs.x;
+        const y = this.y - rhs.y;
+        return x * x + y * y;
+    }
+
+    /**
      * Divides a 2-dimensional vector by another in place.
      *
      * @param {Vec2} rhs - The vector to divide the specified vector by.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const a = new pc.Vec2(4, 9);
-     * const b = new pc.Vec2(2, 3);
+     * const a = new Vec2(4, 9);
+     * const b = new Vec2(2, 3);
      *
      * a.div(b);
      *
@@ -237,9 +275,9 @@ class Vec2 {
      * @param {Vec2} rhs - The divisor vector (the vector dividing the dividend).
      * @returns {Vec2} Self for chaining.
      * @example
-     * const a = new pc.Vec2(4, 9);
-     * const b = new pc.Vec2(2, 3);
-     * const r = new pc.Vec2();
+     * const a = new Vec2(4, 9);
+     * const b = new Vec2(2, 3);
+     * const r = new Vec2();
      *
      * r.div2(a, b);
      *
@@ -259,7 +297,7 @@ class Vec2 {
      * @param {number} scalar - The number to divide by.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const vec = new pc.Vec2(3, 6);
+     * const vec = new Vec2(3, 6);
      *
      * vec.divScalar(3);
      *
@@ -280,8 +318,8 @@ class Vec2 {
      * @param {Vec2} rhs - The second 2-dimensional vector operand of the dot product.
      * @returns {number} The result of the dot product operation.
      * @example
-     * const v1 = new pc.Vec2(5, 10);
-     * const v2 = new pc.Vec2(10, 20);
+     * const v1 = new Vec2(5, 10);
+     * const v2 = new Vec2(10, 20);
      * const v1dotv2 = v1.dot(v2);
      * console.log("The result of the dot product is: " + v1dotv2);
      */
@@ -295,8 +333,8 @@ class Vec2 {
      * @param {Vec2} rhs - The vector to compare to the specified vector.
      * @returns {boolean} True if the vectors are equal and false otherwise.
      * @example
-     * const a = new pc.Vec2(1, 2);
-     * const b = new pc.Vec2(4, 5);
+     * const a = new Vec2(1, 2);
+     * const b = new Vec2(4, 5);
      * console.log("The two vectors are " + (a.equals(b) ? "equal" : "different"));
      */
     equals(rhs) {
@@ -311,8 +349,8 @@ class Vec2 {
      * vectors. Defaults to 1e-6.
      * @returns {boolean} True if the vectors are equal and false otherwise.
      * @example
-     * const a = new pc.Vec2();
-     * const b = new pc.Vec2();
+     * const a = new Vec2();
+     * const b = new Vec2();
      * console.log("The two vectors are approximately " + (a.equalsApprox(b, 1e-9) ? "equal" : "different"));
      */
     equalsApprox(rhs, epsilon = 1e-6) {
@@ -325,7 +363,7 @@ class Vec2 {
      *
      * @returns {number} The magnitude of the specified 2-dimensional vector.
      * @example
-     * const vec = new pc.Vec2(3, 4);
+     * const vec = new Vec2(3, 4);
      * const len = vec.length();
      * // Outputs 5
      * console.log("The length of the vector is: " + len);
@@ -339,7 +377,7 @@ class Vec2 {
      *
      * @returns {number} The magnitude squared of the specified 2-dimensional vector.
      * @example
-     * const vec = new pc.Vec2(3, 4);
+     * const vec = new Vec2(3, 4);
      * const len = vec.lengthSq();
      * // Outputs 25
      * console.log("The length squared of the vector is: " + len);
@@ -358,9 +396,9 @@ class Vec2 {
      * range, the linear interpolant will occur on a ray extrapolated from this line.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const a = new pc.Vec2(0, 0);
-     * const b = new pc.Vec2(10, 10);
-     * const r = new pc.Vec2();
+     * const a = new Vec2(0, 0);
+     * const b = new Vec2(10, 10);
+     * const r = new Vec2();
      *
      * r.lerp(a, b, 0);   // r is equal to a
      * r.lerp(a, b, 0.5); // r is 5, 5
@@ -379,8 +417,8 @@ class Vec2 {
      * @param {Vec2} rhs - The 2-dimensional vector used as the second multiplicand of the operation.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const a = new pc.Vec2(2, 3);
-     * const b = new pc.Vec2(4, 5);
+     * const a = new Vec2(2, 3);
+     * const b = new Vec2(4, 5);
      *
      * a.mul(b);
      *
@@ -401,9 +439,9 @@ class Vec2 {
      * @param {Vec2} rhs - The 2-dimensional vector used as the second multiplicand of the operation.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const a = new pc.Vec2(2, 3);
-     * const b = new pc.Vec2(4, 5);
-     * const r = new pc.Vec2();
+     * const a = new Vec2(2, 3);
+     * const b = new Vec2(4, 5);
+     * const r = new Vec2();
      *
      * r.mul2(a, b);
      *
@@ -423,7 +461,7 @@ class Vec2 {
      * @param {number} scalar - The number to multiply by.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const vec = new pc.Vec2(3, 6);
+     * const vec = new Vec2(3, 6);
      *
      * vec.mulScalar(3);
      *
@@ -438,13 +476,24 @@ class Vec2 {
     }
 
     /**
+     * @deprecated Use Vec2#mulScalar instead.
+     * @param {number} scalar - The number to multiply by.
+     * @returns {Vec2} Self for chaining.
+     * @ignore
+     */
+    scale(scalar) {
+        Debug.deprecated('Vec2#scale is deprecated. Use Vec2#mulScalar instead.');
+        return this.mulScalar(scalar);
+    }
+
+    /**
      * Returns this 2-dimensional vector converted to a unit vector in place. If the vector has a
      * length of zero, the vector's elements will be set to zero.
      *
      * @param {Vec2} [src] - The vector to normalize. If not set, the operation is done in place.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const v = new pc.Vec2(25, 0);
+     * const v = new Vec2(25, 0);
      *
      * v.normalize();
      *
@@ -468,7 +517,7 @@ class Vec2 {
      * @param {number} degrees - The number to degrees to rotate the vector by.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const v = new pc.Vec2(0, 10);
+     * const v = new Vec2(0, 10);
      *
      * v.rotate(45); // rotates by 45 degrees
      *
@@ -488,7 +537,7 @@ class Vec2 {
      *
      * @returns {number} The angle in degrees of the specified 2-dimensional vector.
      * @example
-     * const v = new pc.Vec2(6, 0);
+     * const v = new Vec2(6, 0);
      * const angle = v.angle();
      * // Outputs 90..
      * console.log("The angle of the vector is: " + angle);
@@ -503,8 +552,8 @@ class Vec2 {
      * @param {Vec2} rhs - The 2-dimensional vector to calculate angle to.
      * @returns {number} The shortest angle in degrees between two 2-dimensional vectors.
      * @example
-     * const a = new pc.Vec2(0, 10); // up
-     * const b = new pc.Vec2(1, -1); // down-right
+     * const a = new Vec2(0, 10); // up
+     * const b = new Vec2(1, -1); // down-right
      * const angle = a.angleTo(b);
      * // Outputs 135..
      * console.log("The angle between vectors a and b: " + angle);
@@ -519,7 +568,7 @@ class Vec2 {
      * @param {Vec2} [src] - The vector to floor. If not set, the operation is done in place.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const v = new pc.Vec2(1.2, 3.9);
+     * const v = new Vec2(1.2, 3.9);
      * v.floor();
      * // v is now [1, 3]
      */
@@ -535,7 +584,7 @@ class Vec2 {
      * @param {Vec2} [src] - The vector to ceil. If not set, the operation is done in place.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const v = new pc.Vec2(1.2, 3.1);
+     * const v = new Vec2(1.2, 3.1);
      * v.ceil();
      * // v is now [2, 4]
      */
@@ -551,7 +600,7 @@ class Vec2 {
      * @param {Vec2} [src] - The vector to round. If not set, the operation is done in place.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const v = new pc.Vec2(1.4, 3.6);
+     * const v = new Vec2(1.4, 3.6);
      * v.round();
      * // v is now [1, 4]
      */
@@ -567,8 +616,8 @@ class Vec2 {
      * @param {Vec2} rhs - The 2-dimensional vector used as the source of elements to compare to.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const a = new pc.Vec2(5, 1);
-     * const b = new pc.Vec2(2, 8);
+     * const a = new Vec2(5, 1);
+     * const b = new Vec2(2, 8);
      * a.min(b);
      * // a is now [2, 1]
      */
@@ -584,8 +633,8 @@ class Vec2 {
      * @param {Vec2} rhs - The 2-dimensional vector used as the source of elements to compare to.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const a = new pc.Vec2(5, 1);
-     * const b = new pc.Vec2(2, 8);
+     * const a = new Vec2(5, 1);
+     * const b = new Vec2(2, 8);
      * a.max(b);
      * // a is now [5, 8]
      */
@@ -602,7 +651,7 @@ class Vec2 {
      * @param {number} y - The value to set on the second component of the vector.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const v = new pc.Vec2();
+     * const v = new Vec2();
      * v.set(5, 10);
      *
      * // Outputs 5, 10
@@ -621,8 +670,8 @@ class Vec2 {
      * @param {Vec2} rhs - The vector to subtract from the specified vector.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const a = new pc.Vec2(10, 10);
-     * const b = new pc.Vec2(20, 20);
+     * const a = new Vec2(10, 10);
+     * const b = new Vec2(20, 20);
      *
      * a.sub(b);
      *
@@ -643,9 +692,9 @@ class Vec2 {
      * @param {Vec2} rhs - The second vector operand for the subtraction.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const a = new pc.Vec2(10, 10);
-     * const b = new pc.Vec2(20, 20);
-     * const r = new pc.Vec2();
+     * const a = new Vec2(10, 10);
+     * const b = new Vec2(20, 20);
+     * const r = new Vec2();
      *
      * r.sub2(a, b);
      *
@@ -665,7 +714,7 @@ class Vec2 {
      * @param {number} scalar - The number to subtract.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const vec = new pc.Vec2(3, 4);
+     * const vec = new Vec2(3, 4);
      *
      * vec.subScalar(2);
      *
@@ -687,7 +736,7 @@ class Vec2 {
      * array. Default is 0.
      * @returns {Vec2} Self for chaining.
      * @example
-     * const v = new pc.Vec2();
+     * const v = new Vec2();
      * v.fromArray([20, 10]);
      * // v is set to [20, 10]
      */
@@ -703,7 +752,7 @@ class Vec2 {
      *
      * @returns {string} The vector in string form.
      * @example
-     * const v = new pc.Vec2(20, 10);
+     * const v = new Vec2(20, 10);
      * // Outputs [20, 10]
      * console.log(v.toString());
      */
@@ -736,7 +785,7 @@ class Vec2 {
      * array. Default is 0.
      * @returns {number[]|ArrayBufferView} The vector as an array.
      * @example
-     * const v = new pc.Vec2(20, 10);
+     * const v = new Vec2(20, 10);
      * // Outputs [20, 10]
      * console.log(v.toArray());
      */

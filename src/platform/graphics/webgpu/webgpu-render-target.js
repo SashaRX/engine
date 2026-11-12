@@ -1,6 +1,7 @@
 import { Debug, DebugHelper } from '../../../core/debug.js';
 import { StringIds } from '../../../core/string-ids.js';
 import { getMultisampledTextureCache } from '../multi-sampled-texture-cache.js';
+import { validateClearValues } from '../render-pass.js';
 import { WebgpuDebug } from './webgpu-debug.js';
 
 /**
@@ -29,9 +30,27 @@ class ColorAttachment {
      */
     multisampledBuffer;
 
+    /**
+     * True if the multi-sampled buffer is a transient ("memoryless") attachment, and so must be
+     * cleared on load and discarded on store.
+     *
+     * @type {boolean}
+     */
+    transient = false;
+
+    /**
+     * View of the resolve buffer of an explicit multisampled attachment, used to attach / detach
+     * the resolve target based on the per-pass resolve flag. The underlying texture is user-owned.
+     *
+     * @type {GPUTextureView|undefined}
+     * @private
+     */
+    resolveView;
+
     destroy(device) {
         device.deferDestroy(this.multisampledBuffer);
         this.multisampledBuffer = null;
+        this.resolveView = undefined;
     }
 }
 
@@ -73,6 +92,14 @@ class DepthAttachment {
      * Key used to store multisampledDepthBuffer in the cache.
      */
     multisampledDepthBufferKey;
+
+    /**
+     * True if the depth attachment is a transient ("memoryless") attachment, and so must be
+     * cleared on load and discarded on store.
+     *
+     * @type {boolean}
+     */
+    transient = false;
 
     /**
      * @param {string} gpuFormat - The WebGPU format (GPUTextureFormat).
@@ -188,17 +215,25 @@ class WebgpuRenderTarget {
      * Assign a color buffer. This allows the color buffer of the main framebuffer
      * to be swapped each frame to a buffer provided by the context.
      *
-     * @param {WebgpuGraphicsDevice} device - The WebGPU graphics device.
-     * @param {any} gpuTexture - The color buffer.
+     * @param {any} gpuTexture - // `GPUTexture`; using `any` to avoid exporting WebGPU types in published typings.
+     * @param {any} viewFormat - // `GPUTextureFormat`; using `any` to avoid exporting WebGPU types in published typings (may differ from texture storage for sRGB).
      */
-    assignColorTexture(device, gpuTexture) {
+    assignColorTexture(gpuTexture, viewFormat) {
 
         Debug.assert(gpuTexture);
         this.assignedColorTexture = gpuTexture;
 
-        // create view (optionally handles srgb conversion)
-        const view = gpuTexture.createView({ format: device.backBufferViewFormat });
-        DebugHelper.setLabel(view, 'Framebuffer.assignedColor');
+        const wgpuDevice = /** @type {WebgpuGraphicsDevice} */ (this.renderTarget.device);
+        const xrViewDesc = wgpuDevice?.xrColorTextureViewDescriptor;
+        const xrSlice = xrViewDesc && gpuTexture === wgpuDevice.xrColorTexture;
+        // When the WebXR runtime supplies a per-eye view descriptor, pass it through as-is.
+        // The descriptor already carries the runtime's intended `format` (e.g. an sRGB view
+        // format over a linear texture) along with the per-eye slice selection — merging an
+        // override on top would discard the runtime's chosen format.
+        const view = gpuTexture.createView(
+            xrSlice ? xrViewDesc : { format: viewFormat }
+        );
+        DebugHelper.setLabel(view, xrSlice ? 'Framebuffer.xrColorTextureView' : 'Framebuffer.contextColorTextureView');
 
         // use it as render buffer or resolve target
         const colorAttachment = this.renderPassDescriptor.colorAttachments[0];
@@ -210,7 +245,7 @@ class WebgpuRenderTarget {
         }
 
         // for main framebuffer, this is how the format is obtained
-        this.setColorAttachment(0, undefined, device.backBufferViewFormat);
+        this.setColorAttachment(0, undefined, viewFormat);
 
         this.updateKey();
     }
@@ -303,7 +338,24 @@ class WebgpuRenderTarget {
                     usage: GPUTextureUsage.RENDER_ATTACHMENT
                 };
 
-                if (samples > 1) {
+                // transient (memoryless) depth - keep the contents on-chip only, which precludes
+                // sampling (resolve) or copying (grab) it. The RT flag is already gated on device support.
+                const transientDepth = renderTarget.transientDepth;
+
+                if (transientDepth) {
+                    // memoryless attachment: RENDER_ATTACHMENT only, never sampled or copied.
+                    //
+                    // Transient-attachment validation invariants, all satisfied here and which must
+                    // be preserved by any future edit:
+                    // - no `viewFormats` on this descriptor (must be an empty array for transient textures);
+                    // - the view below is created with no `usage` override (a view cannot change a
+                    //   transient texture's usage);
+                    // - this texture is only ever a depth render `view`, never a `resolveTarget`
+                    //   (depth resolve/grab is additionally blocked while transient - see
+                    //   WebgpuGraphicsDevice).
+                    depthTextureDesc.usage |= GPUTextureUsage.TRANSIENT_ATTACHMENT;
+                    this.depthAttachment.transient = true;
+                } else if (samples > 1) {
                     // enable multi-sampled depth texture to be a source of our shader based resolver in WebgpuResolver
                     // TODO: we do not always need to resolve it, and so might consider this flag to be optional
                     depthTextureDesc.usage |= GPUTextureUsage.TEXTURE_BINDING;
@@ -322,6 +374,18 @@ class WebgpuRenderTarget {
                 renderingView = depthTexture.createView();
                 DebugHelper.setLabel(renderingView, `${renderTarget.name}.autoDepthView`);
 
+            } else if (depthBuffer.samples > 1) {
+
+                // explicit multisampled depth attachment - the depth buffer is itself a
+                // multisampled depth-format texture, rendered into directly. The user texture is
+                // not owned by this render target.
+                this.depthAttachment = new DepthAttachment(depthBuffer.impl.format);
+                this.depthAttachment.depthTexture = depthBuffer.impl.gpuTexture;
+                this.depthAttachment.depthTextureInternal = false;
+
+                renderingView = depthBuffer.impl.gpuTexture.createView();
+                DebugHelper.setLabel(renderingView, `${renderTarget.name}.msDepthView`);
+
             } else {  // use provided depth buffer
 
                 this.depthAttachment = new DepthAttachment(depthBuffer.impl.format);
@@ -334,8 +398,9 @@ class WebgpuRenderTarget {
                     this.depthAttachment.format = depthFormat;
                     this.depthAttachment.hasStencil = depthFormat === 'depth24plus-stencil8';
 
-                    // key for matching multi-sampled depth buffer
-                    const key = `${depthBuffer.id}:${width}:${height}:${samples}:${depthFormat}`;
+                    // key for matching multi-sampled depth buffer - render targets rendering to
+                    // different faces / layers of the depth buffer need their own
+                    const key = `${depthBuffer.id}:${renderTarget.getLayer(depthBuffer)}:${width}:${height}:${samples}:${depthFormat}`;
 
                     // check if we have already allocated a multi-sampled depth buffer for the depth buffer
                     const msTextures = getMultisampledTextureCache(device);
@@ -370,10 +435,28 @@ class WebgpuRenderTarget {
                 } else {
 
                     // use provided depth buffer
-                    const depthTexture = depthBuffer.impl.gpuTexture;
-                    this.depthAttachment.depthTexture = depthTexture;
+                    this.depthAttachment.depthTexture = depthBuffer.impl.gpuTexture;
 
-                    renderingView = depthTexture.createView();
+                    // render to mip level 0, as a render target with a depth buffer does not
+                    // support rendering to a mip level
+                    const mipLevelCount = 1;
+
+                    // single layer view - a layer of a 2d array texture, or a cubemap face, which
+                    // is a 2d array layer in order [+X, -X, +Y, -Y, +Z, -Z]
+                    if (depthBuffer.cubemap || depthBuffer.array) {
+                        renderingView = depthBuffer.impl.createView({
+                            dimension: '2d',
+                            baseArrayLayer: renderTarget.layer,
+                            arrayLayerCount: 1,
+                            mipLevelCount,
+                            baseMipLevel: 0
+                        });
+                    } else {
+                        renderingView = depthBuffer.impl.createView({
+                            mipLevelCount,
+                            baseMipLevel: 0
+                        });
+                    }
                     DebugHelper.setLabel(renderingView, `${renderTarget.name}.depthView`);
                 }
             }
@@ -411,16 +494,18 @@ class WebgpuRenderTarget {
             // render to a single mip level
             const mipLevelCount = 1;
 
-            // cubemap face view - face is a single 2d array layer in order [+X, -X, +Y, -Y, +Z, -Z]
-            if (colorBuffer.cubemap) {
+            // single layer view - a layer of a 2d array texture, or a cubemap face, which is a 2d
+            // array layer in order [+X, -X, +Y, -Y, +Z, -Z]
+            if (colorBuffer.cubemap || colorBuffer.array) {
                 colorView = colorBuffer.impl.createView({
                     dimension: '2d',
-                    baseArrayLayer: renderTarget.face,
+                    baseArrayLayer: renderTarget.layer,
                     arrayLayerCount: 1,
                     mipLevelCount,
                     baseMipLevel: mipLevel
                 });
             } else {
+                // a 2d texture, or a volume texture, whose depth slice is selected by the attachment
                 colorView = colorBuffer.impl.createView({
                     mipLevelCount,
                     baseMipLevel: mipLevel
@@ -431,7 +516,49 @@ class WebgpuRenderTarget {
         // multi-sampled color buffer
         if (samples > 1) {
 
-            const format = this.isBackbuffer ? device.backBufferViewFormat : colorBuffer.impl.format;
+            // explicit multisampled attachment - the color buffer is itself a multisampled
+            // texture, rendered into directly; the optional per-attachment resolve buffer becomes
+            // the resolve target. The user texture is not owned by this render target.
+            if (!this.isBackbuffer && colorBuffer?.samples > 1) {
+
+                this.setColorAttachment(index, undefined, colorBuffer.impl.format);
+
+                colorAttachment.view = colorView;
+                DebugHelper.setLabel(colorAttachment.view, `${renderTarget.name}.msColorView`);
+
+                const resolveBuffer = renderTarget.getResolveBuffer(index);
+                if (resolveBuffer) {
+                    const resolveView = resolveBuffer.impl.createView({ mipLevelCount: 1, baseMipLevel: 0 });
+                    DebugHelper.setLabel(resolveView, `${renderTarget.name}.resolveView`);
+
+                    // stored on the attachment info so setupForRenderPass can honor the per-pass
+                    // resolve flag by attaching / detaching it
+                    this.colorAttachments[index].resolveView = resolveView;
+                    colorAttachment.resolveTarget = resolveView;
+                }
+
+                return colorAttachment;
+            }
+
+            // Main framebuffer: MSAA texture format must match the attachment view format used for
+            // resolve; WebgpuGraphicsDevice#frameStart sets that on this impl via setColorAttachment
+            // before the first init.
+            const format = this.isBackbuffer ?
+                (this.colorAttachments[index]?.format ?? device.backBufferViewFormat) :
+                colorBuffer.impl.format;
+
+            // transient (memoryless) color - the multi-sampled buffer is only ever rendered to and
+            // resolved into the single-sampled target, never stored, sampled or copied, so it can be
+            // kept on-chip. The RT flag is already gated on device support and MSAA.
+            //
+            // Transient-attachment validation invariants, all satisfied here and which must be
+            // preserved by any future edit:
+            // - no `viewFormats` on the descriptor below (must be an empty array for transient textures);
+            // - the multi-sampled view is created with no `usage` override (a view cannot change a
+            //   transient texture's usage);
+            // - this multi-sampled buffer is the render `view`; the single-sampled, non-transient
+            //   buffer is the `resolveTarget` - a transient texture must never be the `resolveTarget`.
+            const transientColor = renderTarget.transientColor;
 
             /** @type {GPUTextureDescriptor} */
             const multisampledTextureDesc = {
@@ -439,13 +566,16 @@ class WebgpuRenderTarget {
                 dimension: '2d',
                 sampleCount: samples,
                 format: format,
-                usage: GPUTextureUsage.RENDER_ATTACHMENT
+                usage: transientColor ?
+                    GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TRANSIENT_ATTACHMENT :
+                    GPUTextureUsage.RENDER_ATTACHMENT
             };
 
             // allocate multi-sampled color buffer
             const multisampledColorBuffer = wgpu.createTexture(multisampledTextureDesc);
             DebugHelper.setLabel(multisampledColorBuffer, `${renderTarget.name}.multisampledColor`);
             this.setColorAttachment(index, multisampledColorBuffer, multisampledTextureDesc.format);
+            this.colorAttachments[index].transient = transientColor;
 
             colorAttachment.view = multisampledColorBuffer.createView();
             DebugHelper.setLabel(colorAttachment.view, `${renderTarget.name}.multisampledColorView`);
@@ -455,6 +585,11 @@ class WebgpuRenderTarget {
         } else {
 
             colorAttachment.view = colorView;
+
+            // a volume texture renders to a depth slice of its 3d view
+            if (colorBuffer?.volume) {
+                colorAttachment.depthSlice = renderTarget.slice;
+            }
         }
 
         return colorAttachment;
@@ -473,6 +608,10 @@ class WebgpuRenderTarget {
 
         Debug.assert(this.renderPassDescriptor);
 
+        // integer formats require the clear value components to be integers representable in the
+        // format, otherwise WebGPU generates a validation error
+        Debug.call(() => validateClearValues(renderPass));
+
         const count = this.renderPassDescriptor.colorAttachments?.length ?? 0;
         for (let i = 0; i < count; ++i) {
             const colorAttachment = this.renderPassDescriptor.colorAttachments[i];
@@ -481,6 +620,30 @@ class WebgpuRenderTarget {
             colorAttachment.clearValue = srgb ? colorOps.clearValueLinear : colorOps.clearValue;
             colorAttachment.loadOp = colorOps.clear ? 'clear' : 'load';
             colorAttachment.storeOp = colorOps.store ? 'store' : 'discard';
+
+            // explicit multisampled attachment with a resolve buffer - honor the per-pass resolve
+            // flag by attaching / detaching the resolve target
+            if (this.colorAttachments[i]?.resolveView) {
+                colorAttachment.resolveTarget = colorOps.resolve ? this.colorAttachments[i].resolveView : undefined;
+            }
+
+            // a multisampled attachment that is neither stored nor resolved produces no observable
+            // output - rendering into the void. This cannot happen with default ops, only when
+            // they are overridden.
+            if (!this.isBackbuffer && renderTarget.samples > 1 && colorAttachment.storeOp === 'discard' && !colorAttachment.resolveTarget) {
+                Debug.warnOnce(`Render target '${renderTarget.name}': multisampled color attachment ${i} is neither stored nor resolved, the rendered output is discarded.`);
+            }
+
+            // a transient (memoryless) attachment must be cleared on load and discarded on store.
+            // The frame-graph store-on-no-clear optimization can flip these post-authoring (e.g. a
+            // later pass reuses this target without clearing, or its contents are grabbed), which
+            // would be an invalid use of a transient texture - force compliant ops to avoid a
+            // WebGPU validation error (rendering may be incorrect, hence the error).
+            if (this.colorAttachments[i]?.transient && (colorAttachment.loadOp !== 'clear' || colorAttachment.storeOp !== 'discard')) {
+                Debug.errorOnce(`Transient (memoryless) color attachment on render target '${renderTarget.name}' requires loadOp 'clear' and storeOp 'discard', but resolved to loadOp '${colorAttachment.loadOp}' / storeOp '${colorAttachment.storeOp}'. This is usually caused by a later pass reusing this target without clearing, or by a color grab pass (sceneColorMap). Forcing clear/discard to avoid a validation error; rendering may be incorrect. Disable transientColor or stop reusing/grabbing this target.`);
+                colorAttachment.loadOp = 'clear';
+                colorAttachment.storeOp = 'discard';
+            }
         }
 
         const depthAttachment = this.renderPassDescriptor.depthStencilAttachment;
@@ -496,6 +659,21 @@ class WebgpuRenderTarget {
                 depthAttachment.stencilLoadOp = renderPass.depthStencilOps.clearStencil ? 'clear' : 'load';
                 depthAttachment.stencilStoreOp = renderPass.depthStencilOps.storeStencil ? 'store' : 'discard';
                 depthAttachment.stencilReadOnly = false;
+            }
+
+            // transient (memoryless) depth must be cleared on load and discarded on store (see the
+            // color attachment note above) - force compliant ops to avoid a validation error.
+            if (this.depthAttachment.transient &&
+                (depthAttachment.depthLoadOp !== 'clear' || depthAttachment.depthStoreOp !== 'discard' ||
+                (this.depthAttachment.hasStencil && (depthAttachment.stencilLoadOp !== 'clear' || depthAttachment.stencilStoreOp !== 'discard')))) {
+
+                Debug.errorOnce(`Transient (memoryless) depth attachment on render target '${renderTarget.name}' requires loadOp 'clear' and storeOp 'discard', but resolved to depth loadOp '${depthAttachment.depthLoadOp}' / storeOp '${depthAttachment.depthStoreOp}'. This is usually caused by a later pass reusing this target without clearing, or by a depth grab pass (sceneDepthMap) / depth prepass / depth resolve. Forcing clear/discard to avoid a validation error; rendering may be incorrect. Disable transientDepth or stop reusing/grabbing this target.`);
+                depthAttachment.depthLoadOp = 'clear';
+                depthAttachment.depthStoreOp = 'discard';
+                if (this.depthAttachment.hasStencil) {
+                    depthAttachment.stencilLoadOp = 'clear';
+                    depthAttachment.stencilStoreOp = 'discard';
+                }
             }
         }
     }

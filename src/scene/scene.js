@@ -9,24 +9,49 @@ import { Mat4 } from '../core/math/mat4.js';
 import { PIXELFORMAT_RGBA8, ADDRESS_CLAMP_TO_EDGE, FILTER_LINEAR } from '../platform/graphics/constants.js';
 import { BAKE_COLORDIR, LAYERID_IMMEDIATE } from './constants.js';
 import { LightingParams } from './lighting/lighting-params.js';
-import { GSplatParams } from './gsplat-unified/gsplat-params.js';
 import { Sky } from './skybox/sky.js';
 import { Immediate } from './immediate/immediate.js';
 import { EnvLighting } from './graphics/env-lighting.js';
 import { FogParams } from './fog-params.js';
+import { getDefaultMaterial } from './materials/default-material.js';
 
 /**
  * @import { Entity } from '../framework/entity.js'
  * @import { GraphicsDevice } from '../platform/graphics/graphics-device.js'
  * @import { LayerComposition } from './composition/layer-composition.js'
  * @import { Layer } from './layer.js'
+ * @import { Renderer } from './renderer/renderer.js'
  * @import { Texture } from '../platform/graphics/texture.js'
+ * @import { GSplatParams } from './gsplat-unified/gsplat-params.js'
  */
 
 /**
  * A scene is a graphical representation of an environment. It manages the scene hierarchy, all
  * graphical objects, lights, and scene-wide properties.
  *
+ * Each application has one at {@link AppBase#scene}. The scene owns the rendering setup that is
+ * not tied to a single entity: the {@link layers} composition that decides render order; the
+ * lighting environment through {@link ambientLight}, {@link skybox}, {@link envAtlas} and the
+ * {@link sky} and {@link lighting} parameter objects; {@link exposure}, or {@link physicalUnits}
+ * in its place, for overall brightness; the lightmapping settings; and the fog described below.
+ *
+ * The scene fires `prerender` and `postrender` for each camera that renders it, and `precull`
+ * and `postcull` around visibility culling. Per-frame work that needs to know the camera belongs
+ * in those handlers.
+ *
+ * Fog is scene-wide: {@link fog} is a read-only {@link FogParams} whose `type`, `color`, `start`
+ * and `end` you set, and {@link CameraComponent#fog} can override it for a single camera.
+ *
+ * @example
+ * // Light the scene from a prefiltered environment and brighten it slightly
+ * app.scene.envAtlas = envAtlasAsset.resource;
+ * app.scene.skybox = skyboxAsset.resource;
+ * app.scene.exposure = 1.2;
+ * @example
+ * // Run code for each camera just before it renders the scene
+ * app.scene.on('prerender', (camera) => {
+ *     // camera is the CameraComponent about to render
+ * });
  * @category Graphics
  */
 class Scene extends EventHandler {
@@ -121,23 +146,34 @@ class Scene extends EventHandler {
     static EVENT_POSTRENDER_LAYER = 'postrender:layer';
 
     /**
-     * Fired before visibility culling is performed for the camera.
+     * Fired before mesh instance visibility culling is performed for a camera, just before the
+     * camera's culling frustum is refreshed (so a handler may still adjust the camera). The handler
+     * is passed the {@link CameraComponent} being culled, or null when the culling is internal (for
+     * example when culling shadow casters for a light's shadow map). Note that light visibility
+     * culling happens earlier in the frame and is not bracketed by this event.
      *
      * @event
      * @example
      * app.scene.on('precull', (camera) => {
-     *    console.log(`Visibility culling will be performed for camera ${camera.entity.name}`);
+     *    if (camera) {
+     *        console.log(`Visibility culling will be performed for camera ${camera.entity.name}`);
+     *    }
      * });
      */
     static EVENT_PRECULL = 'precull';
 
     /**
-     * Fired after visibility culling is performed for the camera.
+     * Fired after mesh instance visibility culling is performed for a camera; mesh instance
+     * visibility (such as {@link MeshInstance#visibleThisFrame}) is up to date when this fires. The
+     * handler is passed the {@link CameraComponent} that was culled, or null when the culling is
+     * internal (for example when culling shadow casters for a light's shadow map).
      *
      * @event
      * @example
      * app.scene.on('postcull', (camera) => {
-     *    console.log(`Visibility culling was performed for camera ${camera.entity.name}`);
+     *    if (camera) {
+     *        console.log(`Visibility culling was performed for camera ${camera.entity.name}`);
+     *    }
      * });
      */
     static EVENT_POSTCULL = 'postcull';
@@ -252,15 +288,12 @@ class Scene extends EventHandler {
     _fogParams = new FogParams();
 
     /**
-     * Internal flag to indicate that the specular (and sheen) maps of standard materials should be
-     * assumed to be in a linear space, instead of sRGB. This is used by the editor using engine v2
-     * internally to render in a style of engine v1, where spec those textures were specified as
-     * linear, while engine 2 assumes they are in sRGB space. This should be removed when the editor
-     * no longer supports engine v1 projects.
+     * The renderer rendering this scene, set when the renderer is created.
      *
+     * @type {Renderer|null}
      * @ignore
      */
-    forcePassThroughSpecular = false;
+    renderer = null;
 
     /**
      * Create a new Scene instance.
@@ -328,8 +361,12 @@ class Scene extends EventHandler {
          */
         this.gsplatCentersEnabled = true;
 
-        // gsplat params
-        this._gsplatParams = new GSplatParams(this.device);
+        // gsplat params are initialized by GSplatComponentSystem when it is included in the app
+        /**
+         * @type {GSplatParams|null}
+         * @ignore
+         */
+        this._gsplatParams = null;
 
         // skybox
         this._sky = new Sky(this);
@@ -439,7 +476,10 @@ class Scene extends EventHandler {
     }
 
     /**
-     * Sets the environment lighting atlas.
+     * Sets the environment lighting atlas: prefiltered mip levels of the environment packed into a
+     * single equirectangular texture. To build one from an equirectangular or cubemap source, use
+     * `EnvLighting.generateLightingSource` followed by `EnvLighting.generateAtlas`; a raw HDR
+     * texture assigned here will not light the scene correctly.
      *
      * @type {Texture|null}
      */
@@ -519,7 +559,28 @@ class Scene extends EventHandler {
      * @type {GSplatParams}
      */
     get gsplat() {
+        Debug.assert(this._gsplatParams, 'Scene#gsplat requires GSplatComponentSystem to be included in the app.');
+        return /** @type {GSplatParams} */ (this._gsplatParams);
+    }
+
+    /**
+     * Gets the GSplat parameters, or null when GSplatComponentSystem is not included in the app.
+     *
+     * @returns {GSplatParams|null} The GSplat parameters.
+     * @ignore
+     */
+    getGsplatParams() {
         return this._gsplatParams;
+    }
+
+    /**
+     * Sets the GSplat parameters owned by GSplatComponentSystem.
+     *
+     * @param {GSplatParams|null} value - The GSplat parameters.
+     * @ignore
+     */
+    setGsplatParams(value) {
+        this._gsplatParams = value;
     }
 
     /**
@@ -615,6 +676,11 @@ class Scene extends EventHandler {
 
     /**
      * Sets the base cubemap texture used as the scene's skybox when skyboxMip is 0. Defaults to null.
+     *
+     * For a sky that needs no cubemap asset, `playcanvas/scripts/esm/sky/procedural-sky.mjs`
+     * renders an analytic daylight sky and keeps a directional light aligned with the sun so
+     * direct lighting and shadows match. Related scene-dressing scripts ship alongside it:
+     * `water.mjs`, `grid.mjs` and `shadow-catcher.mjs`.
      *
      * @type {Texture|null}
      */
@@ -750,9 +816,9 @@ class Scene extends EventHandler {
     }
 
     /**
-     * Gets the rotation of the skybox to be displayed.
+     * Gets the rotation of the skybox to be displayed. Use the setter to update skybox state.
      *
-     * @type {Quat}
+     * @type {Readonly<Quat>}
      */
     get skyboxRotation() {
         return this._skyboxRotation;
@@ -808,6 +874,8 @@ class Scene extends EventHandler {
 
         this.clusteredLightingEnabled = render.clusteredLightingEnabled ?? false;
         this.lighting.applySettings(render);
+
+        this.getGsplatParams()?.applySettings(render);
 
         // bake settings
         [
@@ -891,6 +959,210 @@ class Scene extends EventHandler {
     get lightmapPixelFormat() {
         return this.lightmapHDR && this.device.getRenderableHdrFormat() || PIXELFORMAT_RGBA8;
     }
+
+    // ---- deprecated block start ----
+
+    /**
+     * @deprecated No replacement is available.
+     * @ignore
+     */
+    get defaultMaterial() {
+        Debug.deprecated('Scene#defaultMaterial is deprecated.');
+        return getDefaultMaterial(this.device);
+    }
+
+    /**
+     * @deprecated Use Scene#fog.color instead.
+     * @ignore
+     */
+    set fogColor(value) {
+        Debug.deprecated('Scene#fogColor is deprecated. Use Scene#fog.color instead.');
+        this.fog.color = value;
+    }
+
+    /**
+     * @deprecated Use Scene#fog.color instead.
+     * @ignore
+     */
+    get fogColor() {
+        Debug.deprecated('Scene#fogColor is deprecated. Use Scene#fog.color instead.');
+        return this.fog.color;
+    }
+
+    /**
+     * @deprecated Use Scene#fog.end instead.
+     * @ignore
+     */
+    set fogEnd(value) {
+        Debug.deprecated('Scene#fogEnd is deprecated. Use Scene#fog.end instead.');
+        this.fog.end = value;
+    }
+
+    /**
+     * @deprecated Use Scene#fog.end instead.
+     * @ignore
+     */
+    get fogEnd() {
+        Debug.deprecated('Scene#fogEnd is deprecated. Use Scene#fog.end instead.');
+        return this.fog.end;
+    }
+
+    /**
+     * @deprecated Use Scene#fog.start instead.
+     * @ignore
+     */
+    set fogStart(value) {
+        Debug.deprecated('Scene#fogStart is deprecated. Use Scene#fog.start instead.');
+        this.fog.start = value;
+    }
+
+    /**
+     * @deprecated Use Scene#fog.start instead.
+     * @ignore
+     */
+    get fogStart() {
+        Debug.deprecated('Scene#fogStart is deprecated. Use Scene#fog.start instead.');
+        return this.fog.start;
+    }
+
+    /**
+     * @deprecated Use Scene#fog.density instead.
+     * @ignore
+     */
+    set fogDensity(value) {
+        Debug.deprecated('Scene#fogDensity is deprecated. Use Scene#fog.density instead.');
+        this.fog.density = value;
+    }
+
+    /**
+     * @deprecated Use Scene#fog.density instead.
+     * @ignore
+     */
+    get fogDensity() {
+        Debug.deprecated('Scene#fogDensity is deprecated. Use Scene#fog.density instead.');
+        return this.fog.density;
+    }
+
+    /**
+     * @deprecated Use Scene#prefilteredCubemaps instead.
+     * @ignore
+     */
+    set skyboxPrefiltered128(value) {
+        Debug.deprecated('Scene#skyboxPrefiltered128 is deprecated. Use Scene#prefilteredCubemaps instead.');
+        this._prefilteredCubemaps[0] = value;
+        this.updateShaders = true;
+    }
+
+    /**
+     * @deprecated Use Scene#prefilteredCubemaps instead.
+     * @ignore
+     */
+    get skyboxPrefiltered128() {
+        Debug.deprecated('Scene#skyboxPrefiltered128 is deprecated. Use Scene#prefilteredCubemaps instead.');
+        return this._prefilteredCubemaps[0];
+    }
+
+    /**
+     * @deprecated Use Scene#prefilteredCubemaps instead.
+     * @ignore
+     */
+    set skyboxPrefiltered64(value) {
+        Debug.deprecated('Scene#skyboxPrefiltered64 is deprecated. Use Scene#prefilteredCubemaps instead.');
+        this._prefilteredCubemaps[1] = value;
+        this.updateShaders = true;
+    }
+
+    /**
+     * @deprecated Use Scene#prefilteredCubemaps instead.
+     * @ignore
+     */
+    get skyboxPrefiltered64() {
+        Debug.deprecated('Scene#skyboxPrefiltered64 is deprecated. Use Scene#prefilteredCubemaps instead.');
+        return this._prefilteredCubemaps[1];
+    }
+
+    /**
+     * @deprecated Use Scene#prefilteredCubemaps instead.
+     * @ignore
+     */
+    set skyboxPrefiltered32(value) {
+        Debug.deprecated('Scene#skyboxPrefiltered32 is deprecated. Use Scene#prefilteredCubemaps instead.');
+        this._prefilteredCubemaps[2] = value;
+        this.updateShaders = true;
+    }
+
+    /**
+     * @deprecated Use Scene#prefilteredCubemaps instead.
+     * @ignore
+     */
+    get skyboxPrefiltered32() {
+        Debug.deprecated('Scene#skyboxPrefiltered32 is deprecated. Use Scene#prefilteredCubemaps instead.');
+        return this._prefilteredCubemaps[2];
+    }
+
+    /**
+     * @deprecated Use Scene#prefilteredCubemaps instead.
+     * @ignore
+     */
+    set skyboxPrefiltered16(value) {
+        Debug.deprecated('Scene#skyboxPrefiltered16 is deprecated. Use Scene#prefilteredCubemaps instead.');
+        this._prefilteredCubemaps[3] = value;
+        this.updateShaders = true;
+    }
+
+    /**
+     * @deprecated Use Scene#prefilteredCubemaps instead.
+     * @ignore
+     */
+    get skyboxPrefiltered16() {
+        Debug.deprecated('Scene#skyboxPrefiltered16 is deprecated. Use Scene#prefilteredCubemaps instead.');
+        return this._prefilteredCubemaps[3];
+    }
+
+    /**
+     * @deprecated Use Scene#prefilteredCubemaps instead.
+     * @ignore
+     */
+    set skyboxPrefiltered8(value) {
+        Debug.deprecated('Scene#skyboxPrefiltered8 is deprecated. Use Scene#prefilteredCubemaps instead.');
+        this._prefilteredCubemaps[4] = value;
+        this.updateShaders = true;
+    }
+
+    /**
+     * @deprecated Use Scene#prefilteredCubemaps instead.
+     * @ignore
+     */
+    get skyboxPrefiltered8() {
+        Debug.deprecated('Scene#skyboxPrefiltered8 is deprecated. Use Scene#prefilteredCubemaps instead.');
+        return this._prefilteredCubemaps[4];
+    }
+
+    /**
+     * @deprecated Use Scene#prefilteredCubemaps instead.
+     * @ignore
+     */
+    set skyboxPrefiltered4(value) {
+        Debug.deprecated('Scene#skyboxPrefiltered4 is deprecated. Use Scene#prefilteredCubemaps instead.');
+        this._prefilteredCubemaps[5] = value;
+        this.updateShaders = true;
+    }
+
+    /**
+     * @deprecated Use Scene#prefilteredCubemaps instead.
+     * @ignore
+     */
+    get skyboxPrefiltered4() {
+        Debug.deprecated('Scene#skyboxPrefiltered4 is deprecated. Use Scene#prefilteredCubemaps instead.');
+        return this._prefilteredCubemaps[5];
+    }
+
+    get models() {
+        this._models ??= [];
+        return this._models;
+    }
+
+    // ---- deprecated block end ----
 }
 
 export { Scene };

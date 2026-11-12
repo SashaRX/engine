@@ -24,11 +24,11 @@ import { SpriteAnimationClip } from './sprite-animation-clip.js';
 
 const PARAM_EMISSIVE_MAP = 'texture_emissiveMap';
 const PARAM_OPACITY_MAP = 'texture_opacityMap';
-const PARAM_EMISSIVE = 'material_emissive';
-const PARAM_OPACITY = 'material_opacity';
+const PARAM_COLOR = 'mesh_color';
 const PARAM_INNER_OFFSET = 'innerOffset';
 const PARAM_OUTER_SCALE = 'outerScale';
 const PARAM_ATLAS_RECT = 'atlasRect';
+const tempColor = new Color();
 
 /**
  * The SpriteComponent enables an {@link Entity} to render a simple static sprite or sprite
@@ -40,7 +40,7 @@ const PARAM_ATLAS_RECT = 'atlasRect';
  * SpriteComponent to an {@link Entity}, use {@link Entity#addComponent}:
  *
  * ```javascript
- * const entity = new pc.Entity();
+ * const entity = new Entity();
  * entity.addComponent('sprite', {
  *     spriteAsset: spriteAsset
  * });
@@ -50,7 +50,7 @@ const PARAM_ATLAS_RECT = 'atlasRect';
  * {@link Entity#sprite} property:
  *
  * ```javascript
- * entity.sprite.color = pc.Color.RED; // Tint the sprite red
+ * entity.sprite.color = Color.RED; // Tint the sprite red
  *
  * console.log(entity.sprite.color);   // Get the sprite tint and print it
  * ```
@@ -163,7 +163,7 @@ class SpriteComponent extends Component {
     _color = new Color(1, 1, 1, 1);
 
     /** @private */
-    _colorUniform = new Float32Array(3);
+    _colorUniform = new Float32Array(4);
 
     /** @private */
     _speed = 1;
@@ -393,7 +393,7 @@ class SpriteComponent extends Component {
         return this._currentClip.sprite;
     }
 
-    // (private) {pc.Material} material The material used to render a sprite.
+    // (private) {Material} material The material used to render a sprite.
     set material(value) {
         this._material = value;
         if (this._meshInstance) {
@@ -406,7 +406,7 @@ class SpriteComponent extends Component {
     }
 
     /**
-     * Sets the color tint of the sprite.
+     * Sets the color tint of the sprite, specified in sRGB color space.
      *
      * @type {Color}
      */
@@ -416,17 +416,14 @@ class SpriteComponent extends Component {
         this._color.b = value.b;
 
         if (this._meshInstance) {
-            this._colorUniform[0] = this._color.r;
-            this._colorUniform[1] = this._color.g;
-            this._colorUniform[2] = this._color.b;
-            this._meshInstance.setParameter(PARAM_EMISSIVE, this._colorUniform);
+            this._updateColor();
         }
     }
 
     /**
-     * Gets the color tint of the sprite.
+     * Gets the color tint of the sprite in sRGB color space. Use the setter to update the tint.
      *
-     * @type {Color}
+     * @type {Readonly<Color>}
      */
     get color() {
         return this._color;
@@ -440,7 +437,8 @@ class SpriteComponent extends Component {
     set opacity(value) {
         this._color.a = value;
         if (this._meshInstance) {
-            this._meshInstance.setParameter(PARAM_OPACITY, value);
+            this._colorUniform[3] = value;
+            this._meshInstance.setParameter(PARAM_COLOR, this._colorUniform);
         }
     }
 
@@ -744,7 +742,7 @@ class SpriteComponent extends Component {
     /**
      * Gets the array of layer IDs ({@link Layer#id}) to which this sprite belongs.
      *
-     * @type {number[]}
+     * @type {ReadonlyArray<number>}
      */
     get layers() {
         return this._layers;
@@ -804,7 +802,13 @@ class SpriteComponent extends Component {
         }
     }
 
-    onDestroy() {
+    onBeforeRemove() {
+        // removing a component does not disable it first, so undo what onEnable set up. This runs
+        // before the clips are torn down below, as onDisable stops the current clip.
+        if (this.enabled && this.entity.enabled) {
+            this.onDisable();
+        }
+
         this._currentClip = null;
 
         if (this._defaultClip) {
@@ -862,6 +866,17 @@ class SpriteComponent extends Component {
         this._inLayers = false;
     }
 
+    /** @private */
+    _updateColor() {
+        // Color uniforms are in linear space.
+        tempColor.linear(this._color);
+        this._colorUniform[0] = tempColor.r;
+        this._colorUniform[1] = tempColor.g;
+        this._colorUniform[2] = tempColor.b;
+        this._colorUniform[3] = this._color.a;
+        this._meshInstance.setParameter(PARAM_COLOR, this._colorUniform);
+    }
+
     // Set the desired mesh on the mesh instance
     _showFrame(frame) {
         if (!this.sprite) return;
@@ -889,16 +904,11 @@ class SpriteComponent extends Component {
         // create mesh instance if it doesn't exist yet
         if (!this._meshInstance) {
             this._meshInstance = new MeshInstance(mesh, this._material, this._node);
-            this._meshInstance.castShadow = false;
-            this._meshInstance.receiveShadow = false;
+            this._meshInstance.castShadows = false;
+            this._meshInstance.receiveShadows = false;
             this._meshInstance.drawOrder = this._drawOrder;
 
-            // set overrides on mesh instance
-            this._colorUniform[0] = this._color.r;
-            this._colorUniform[1] = this._color.g;
-            this._colorUniform[2] = this._color.b;
-            this._meshInstance.setParameter(PARAM_EMISSIVE, this._colorUniform);
-            this._meshInstance.setParameter(PARAM_OPACITY, this._color.a);
+            this._updateColor();
 
             // now that we created the mesh instance, add it to the layers
             if (this.enabled && this.entity.enabled) {
@@ -1059,10 +1069,11 @@ class SpriteComponent extends Component {
     }
 
     _onLayersChanged(oldComp, newComp) {
-        oldComp.off('add', this._onLayerAdded, this);
-        oldComp.off('remove', this._onLayerRemoved, this);
-        newComp.on('add', this._onLayerAdded, this);
-        newComp.on('remove', this._onLayerRemoved, this);
+        // store the new handles, so that onDisable can unsubscribe from the current composition
+        this._evtLayerAdded?.off();
+        this._evtLayerAdded = newComp.on('add', this._onLayerAdded, this);
+        this._evtLayerRemoved?.off();
+        this._evtLayerRemoved = newComp.on('remove', this._onLayerRemoved, this);
 
         if (this.enabled && this.entity.enabled) {
             this.addToLayers();

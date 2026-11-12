@@ -1,17 +1,20 @@
 export default /* glsl */`
+#ifdef GSPLAT_USER_VARYINGS
+    #include "gsplatUserVaryingsVS"
+#endif
 #include "gsplatCommonVS"
 
 varying mediump vec2 gaussianUV;
-varying mediump vec4 gaussianColor;
+flat varying mediump vec4 gaussianColor;
 
 #ifndef DITHER_NONE
-    varying float id;
+    flat varying float id;
 #endif
 
 mediump vec4 discardVec = vec4(0.0, 0.0, 2.0, 1.0);
 
-#ifdef PREPASS_PASS
-    varying float vLinearDepth;
+#if defined(PREPASS_PASS) || defined(SCENE_TEXTURE_DEPTH)
+    flat varying float vLinearDepth;
 #endif
 
 #if defined(GSPLAT_UNIFIED_ID) && defined(PICK_PASS)
@@ -66,8 +69,10 @@ void main(void) {
 
     // evaluate spherical harmonics
     #if SH_BANDS > 0
-        // calculate the model-space view direction
-        vec3 dir = normalize(center.view * mat3(center.modelView));
+        // calculate the model-space view direction. Orthographic view rays are all parallel to the
+        // camera forward, rather than running from the camera position to the splat.
+        vec3 viewDir = camera_params.w == 1.0 ? vec3(0.0, 0.0, -1.0) : center.view;
+        vec3 dir = normalize(viewDir * mat3(center.modelView));
 
         // read sh coefficients
         vec3 sh[SH_COEFFS];
@@ -93,6 +98,12 @@ void main(void) {
 
     clipCorner(corner, clr.w);
 
+    // over-unity opacity (see gsplatHelpersVS): above 1, the alpha passed to the fragment shader is
+    // 1 + the core radius instead, drawn with peak alpha 1
+    if (clr.w > 1.0) {
+        clr.w = 1.0 + gsplatPlateauCore(clr.w);
+    }
+
     // write output
     #if GSPLAT_2DGS
         // 2DGS: Project world corner directly
@@ -107,7 +118,7 @@ void main(void) {
         // Overdraw visualization mode: color by elevation
         float t = clamp(modelCenter.y / 20.0, 0.0, 1.0);
         vec3 rampColor = textureLod(colorRamp, vec2(t, 0.5), 0.0).rgb;
-        clr.a *= (1.0 / 32.0) * colorRampIntensity;
+        clr.a = min(clr.a, 1.0) * (1.0 / 32.0) * colorRampIntensity;
         gaussianColor = vec4(rampColor, clr.a);
     #else
         gaussianColor = vec4(prepareOutputFromGamma(max(clr.xyz, 0.0), -center.view.z), clr.w);
@@ -117,7 +128,7 @@ void main(void) {
         id = float(splat.index);
     #endif
 
-    #ifdef PREPASS_PASS
+    #if defined(PREPASS_PASS) || defined(SCENE_TEXTURE_DEPTH)
         vLinearDepth = -center.view.z;
     #endif
 

@@ -7,14 +7,14 @@
 [![Reddit](https://img.shields.io/badge/Reddit-FF4500?style=flat&logo=reddit&logoColor=white&color=black)](https://www.reddit.com/r/PlayCanvas)
 [![X](https://img.shields.io/badge/X-000000?style=flat&logo=x&logoColor=white&color=black)](https://x.com/intent/follow?screen_name=playcanvas)
 
-| [User Manual](https://developer.playcanvas.com/user-manual/engine/) | [API Reference](https://api.playcanvas.com/engine/) | [Examples](https://playcanvas.github.io) | [Blog](https://blog.playcanvas.com) | [Forum](https://forum.playcanvas.com) |
+| [User Manual](https://developer.playcanvas.com/user-manual/engine/) | [API Reference](https://api.playcanvas.com/engine/) | [Examples](https://playcanvas.com/examples/) | [Blog](https://blog.playcanvas.com) | [Forum](https://forum.playcanvas.com) |
 
 PlayCanvas is an open-source game engine built on WebGL2 and WebGPU. Use it to create interactive 3D apps, games and visualizations that run in any browser on any device.
 
-[English](https://github.com/playcanvas/engine/blob/dev/README.md)
-[中文](https://github.com/playcanvas/engine/blob/dev/README-zh.md)
-[日本語](https://github.com/playcanvas/engine/blob/dev/README-ja.md)
-[한글](https://github.com/playcanvas/engine/blob/dev/README-kr.md)
+[English](https://github.com/playcanvas/engine/blob/main/README.md)
+[中文](https://github.com/playcanvas/engine/blob/main/README-zh.md)
+[日本語](https://github.com/playcanvas/engine/blob/main/README-ja.md)
+[한글](https://github.com/playcanvas/engine/blob/main/README-kr.md)
 
 ## Install
 
@@ -97,6 +97,10 @@ PlayCanvas is a fully-featured game engine.
 * 🔊 **Sound** - 3D positional sounds built on the Web Audio API
 * 📦 **Assets** - Asynchronous streaming system built on [glTF 2.0](https://www.khronos.org/gltf/), [Draco](https://google.github.io/draco/) and [Basis](https://github.com/BinomialLLC/basis_universal) compression
 * 📜 **Scripts** - Write game behaviors in TypeScript or JavaScript
+
+## Developing with AI
+
+Coding agents: start from the [Engine guides index](https://developer.playcanvas.com/user-manual/engine/llms.txt) and the [Engine API index](https://api.playcanvas.com/engine/llms.txt), which link a Markdown version of every page. [Developing with AI](https://developer.playcanvas.com/user-manual/engine/developing-with-ai/) explains how to set up an agent on a project.
 
 ## Ecosystem
 

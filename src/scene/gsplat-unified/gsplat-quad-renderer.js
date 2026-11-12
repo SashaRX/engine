@@ -34,11 +34,20 @@ class GSplatQuadRenderer extends GSplatRenderer {
     /** @type {Set<string>} */
     _internalDefines = new Set();
 
-    /** @type {boolean} */
-    forceCopyMaterial = true;
-
     /** @private */
     _lastFisheyeEnabled = false;
+
+    /** @private */
+    _lastAntiAlias = false;
+
+    /** @private */
+    _lastAntiAliasMixed = false;
+
+    /** @private */
+    _lastSourceChunksKey = '';
+
+    /** @private */
+    _sourceMaterialVersion = -1;
 
     /**
      * @param {GraphicsDevice} device - The graphics device.
@@ -77,6 +86,11 @@ class GSplatQuadRenderer extends GSplatRenderer {
         this._internalDefines.add('GSPLAT_INDIRECT_DRAW');
         this._internalDefines.add('GSPLAT_SEPARATE_OPACITY');
         this._internalDefines.add('GSPLAT_FISHEYE');
+        this._internalDefines.add('GSPLAT_AA');
+        this._internalDefines.add('GSPLAT_AA_MIXED');
+        this._internalDefines.add('GSPLAT_NO_FOG');
+        this._internalDefines.add('GSPLAT_NO_TONEMAP');
+        this._internalDefines.add('GSPLAT_OVERDRAW');
 
         this.meshInstance = this.createMeshInstance();
     }
@@ -95,8 +109,8 @@ class GSplatQuadRenderer extends GSplatRenderer {
         const isForward = (renderMode & GSPLAT_FORWARD) !== 0;
         const isShadow = (renderMode & GSPLAT_SHADOW) !== 0;
 
-        // Update mesh instance castShadow state FIRST, before adding to arrays
-        this.meshInstance.castShadow = isShadow;
+        // Update mesh instance castShadows state FIRST, before adding to arrays
+        this.meshInstance.castShadows = isShadow;
 
         // Remove from old arrays if needed
         if (wasForward && !isForward) {
@@ -280,16 +294,31 @@ class GSplatQuadRenderer extends GSplatRenderer {
         }
     }
 
+    setAntiAlias(antiAlias, mixed) {
+        if (antiAlias !== this._lastAntiAlias || mixed !== this._lastAntiAliasMixed) {
+            this._lastAntiAlias = antiAlias;
+            this._lastAntiAliasMixed = mixed;
+            this._material.setDefine('GSPLAT_AA', antiAlias);
+            this._material.setDefine('GSPLAT_AA_MIXED', mixed);
+            this._material.update();
+        }
+    }
+
     frameUpdate(params) {
+
+        // Whether the splats contribute to the scene depth. This only selects the blend state, as the
+        // write itself is enabled by a define coming from the camera, so it needs no shader rebuild and
+        // can follow the scene setting from frame to frame.
+        this._material.sceneTexturesWrite = params.sceneDepthWrite;
 
         // Update colorRampIntensity parameter every frame when overdraw is enabled
         if (params.colorRamp) {
             this._material.setParameter('colorRampIntensity', params.colorRampIntensity);
         }
 
-        // Update fisheye projection
+        // Update fisheye projection (forced off in XR — see GSplatRenderer.resolveFisheye)
         const cam = this.cameraNode.camera;
-        this.fisheyeProj.update(params.fisheye, cam.fov, cam.projectionMatrix);
+        this.fisheyeProj.update(this.resolveFisheye(params.fisheye), cam.fov, cam.projectionMatrix);
 
         const fisheyeEnabled = this.fisheyeProj.enabled;
         if (fisheyeEnabled !== this._lastFisheyeEnabled) {
@@ -307,19 +336,23 @@ class GSplatQuadRenderer extends GSplatRenderer {
         }
 
         const noFog = !params.useFog;
-        if (noFog !== this._lastNoFog) {
+        const noTonemap = !params.useTonemap;
+        if (noFog !== this._lastNoFog || noTonemap !== this._lastNoTonemap) {
             this._lastNoFog = noFog;
+            this._lastNoTonemap = noTonemap;
             this._material.setDefine('GSPLAT_NO_FOG', noFog);
+            this._material.setDefine('GSPLAT_NO_TONEMAP', noTonemap);
             this._material.update();
         }
 
         // Check if work buffer format has changed (extra streams added)
         this._syncWithWorkBufferFormat();
 
-        // Copy material settings from params.material if dirty or on first update
-        if (this.forceCopyMaterial || params.material.dirty) {
+        // Copy material settings when the source material has been updated
+        const sourceMaterialVersion = params.material.updateVersion;
+        if (this._sourceMaterialVersion !== sourceMaterialVersion) {
             this.copyMaterialSettings(params.material);
-            this.forceCopyMaterial = false;
+            this._sourceMaterialVersion = sourceMaterialVersion;
         }
     }
 
@@ -370,18 +403,22 @@ class GSplatQuadRenderer extends GSplatRenderer {
      * @private
      */
     copyMaterialSettings(sourceMaterial) {
-        // Clear user defines (preserve internal defines)
+        // Sync defines via setDefine so _definesDirty tracks real changes. Only delete keys the
+        // source no longer has (and that aren't internal). Deleting all user defines and re-adding
+        // them every frame would force _definesDirty true forever and trigger clearVariants on
+        // every frame.
         const keysToDelete = [];
         this._material.defines.forEach((value, key) => {
-            if (!this._internalDefines.has(key)) {
+            if (!this._internalDefines.has(key) && !sourceMaterial.defines.has(key)) {
                 keysToDelete.push(key);
             }
         });
-        keysToDelete.forEach(key => this._material.defines.delete(key));
+        keysToDelete.forEach(key => this._material.setDefine(key, undefined));
 
-        // Copy defines from source material
+        // Add/update defines from the source. setDefine is conditional — it only flips
+        // _definesDirty when the value actually changed, so unchanged entries stay cheap.
         sourceMaterial.defines.forEach((value, key) => {
-            this._material.defines.set(key, value);
+            this._material.setDefine(key, value);
         });
 
         // Copy parameters
@@ -392,13 +429,17 @@ class GSplatQuadRenderer extends GSplatRenderer {
             }
         }
 
-        // Copy shader chunks if they exist
+        // Copy shader chunks only when they actually changed on the source (chunks.key is a
+        // stable content hash). Otherwise the round-trip (copy → delete internal format chunks
+        // → re-inject) would mark chunks dirty every frame and force a per-frame clearVariants.
         if (sourceMaterial.hasShaderChunks) {
-            this._material.shaderChunks.copy(sourceMaterial.shaderChunks);
+            const sourceChunksKey = sourceMaterial.shaderChunks.key;
+            if (sourceChunksKey !== this._lastSourceChunksKey) {
+                this._material.shaderChunks.copy(sourceMaterial.shaderChunks);
+                this._injectFormatChunks();
+                this._lastSourceChunksKey = sourceChunksKey;
+            }
         }
-
-        // Re-inject format chunks that may have been overwritten by copy
-        this._injectFormatChunks();
 
         this._material.update();
     }

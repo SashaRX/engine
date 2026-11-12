@@ -86,29 +86,38 @@ function findNode(node, test) {
  */
 
 /**
- * The GraphNode class represents a node within a hierarchical scene graph. Each GraphNode can
- * reference an array of {@link children}. This creates a tree-like structure that is fundamental
- * for organizing and managing the spatial relationships between objects in a 3D scene. This class
- * provides a comprehensive API for manipulating the position, rotation, and scale of nodes both
- * locally (relative to the {@link parent}) and in world space (relative to the {@link Scene}
- * origin).
+ * A GraphNode is a node in the scene graph: a named object with a position, rotation and scale,
+ * and a list of {@link children} whose transforms are expressed relative to it. Nodes form a tree,
+ * and the world transform of any node is its local transform combined with the world transform of
+ * its {@link parent}; the {@link root} has no parent, so its world transform is its local one. The
+ * engine brings every world transform up to date each frame before rendering, so a change to a
+ * parent reaches all of its descendants.
  *
- * During the application's (see {@link AppBase}) main update loop, the engine automatically
- * synchronizes the entire GraphNode hierarchy each frame. This process ensures that the world
- * transformation matrices for all nodes are up-to-date. A node's world transformation matrix is
- * calculated by combining its local transformation matrix (derived from its local position,
- * rotation, and scale) with the world transformation matrix of its parent node. For the scene
- * graph's {@link root} node (which has no parent), its world matrix is simply its local matrix.
- * This hierarchical update mechanism ensures that changes made to a parent node's transform
- * correctly propagate down to all its children and descendants, accurately reflecting their final
- * position, orientation, and scale in the world. This synchronized world transform is essential
- * for systems like rendering and physics.
+ * GraphNode is the base class of {@link Entity}, which adds components, so in practice these
+ * methods are called on entities. The conventions are the same on both:
  *
- * GraphNode is the superclass of {@link Entity}, which is the primary class for creating objects
- * in a PlayCanvas application. For this reason, developers typically interact with the scene
- * hierarchy and transformations through the Entity interface rather than using GraphNode directly.
- * However, GraphNode provides the underlying powerful set of features for hierarchical
- * transformations that Entity leverages.
+ * - Local methods such as {@link setLocalPosition} and {@link getLocalRotation} work relative to
+ * the parent. Their world counterparts, {@link setPosition}, {@link getRotation} and the rest,
+ * account for the whole chain of ancestors.
+ * - Setters accept separate components or a vector or quaternion, and copy the value.
+ * - Getters return the node's internal storage as read-only; clone the result if you need to
+ * keep or modify it.
+ * - Euler angles are in degrees, and {@link forward} is the node's negative Z axis.
+ *
+ * Build the hierarchy with {@link addChild}, {@link insertChild}, {@link removeChild} and
+ * {@link reparent}, and search it with {@link findByName}, {@link findByPath}, {@link findByTag}
+ * and {@link find}. Setting {@link enabled} to false disables the node and its whole subtree.
+ *
+ * @example
+ * // Move a node one unit in its own facing direction, then turn it to face a target
+ * node.translateLocal(0, 0, -1);
+ * node.lookAt(target.getPosition());
+ * @example
+ * // Getters return read-only internal storage: clone before modifying
+ * const start = node.getPosition().clone();
+ * start.y += 1;
+ * node.setPosition(start);
+ * @category Framework
  */
 class GraphNode extends EventHandler {
     /**
@@ -181,6 +190,15 @@ class GraphNode extends EventHandler {
 
     /** @private */
     _dirtyWorld = false;
+
+    /**
+     * The render version of the last frame in which a skinned or morphed mesh instance attached to
+     * this node or one of its descendants was rendered. Used to skip animating characters which are
+     * not visible.
+     *
+     * @ignore
+     */
+    _deformedRenderVersion = -1;
 
     /**
      * Cached value representing the negatively scaled world transform. If the value is 0, this
@@ -264,7 +282,7 @@ class GraphNode extends EventHandler {
     /**
      * Gets the normalized local space X-axis vector of the graph node in world space.
      *
-     * @type {Vec3}
+     * @type {Readonly<Vec3>}
      */
     get right() {
         if (!this._right) {
@@ -276,7 +294,7 @@ class GraphNode extends EventHandler {
     /**
      * Gets the normalized local space Y-axis vector of the graph node in world space.
      *
-     * @type {Vec3}
+     * @type {Readonly<Vec3>}
      */
     get up() {
         if (!this._up) {
@@ -288,7 +306,7 @@ class GraphNode extends EventHandler {
     /**
      * Gets the normalized local space negative Z-axis vector of the graph node in world space.
      *
-     * @type {Vec3}
+     * @type {Readonly<Vec3>}
      */
     get forward() {
         if (!this._forward) {
@@ -387,13 +405,74 @@ class GraphNode extends EventHandler {
     }
 
     /**
-     * Gets the children of this graph node.
+     * Gets the children of this graph node. Use addChild, insertChild, removeChild or reparent to
+     * change the hierarchy.
      *
-     * @type {GraphNode[]}
+     * @type {ReadonlyArray<GraphNode>}
      */
     get children() {
         return this._children;
     }
+
+    // ---- deprecated block start ----
+
+    /**
+     * @deprecated Use GraphNode#children instead.
+     * @ignore
+     */
+    getChildren() {
+        Debug.deprecated('GraphNode#getChildren is deprecated. Use GraphNode#children instead.');
+        return this.children;
+    }
+
+    /**
+     * @deprecated Use GraphNode#name instead.
+     * @ignore
+     */
+    getName() {
+        Debug.deprecated('GraphNode#getName is deprecated. Use GraphNode#name instead.');
+        return this.name;
+    }
+
+    /**
+     * @deprecated Use GraphNode#path instead.
+     * @ignore
+     */
+    getPath() {
+        Debug.deprecated('GraphNode#getPath is deprecated. Use GraphNode#path instead.');
+        return this.path;
+    }
+
+    /**
+     * @deprecated Use GraphNode#root instead.
+     * @ignore
+     */
+    getRoot() {
+        Debug.deprecated('GraphNode#getRoot is deprecated. Use GraphNode#root instead.');
+        return this.root;
+    }
+
+    /**
+     * @deprecated Use GraphNode#parent instead.
+     * @returns {GraphNode|null} The parent node, or null if this node has no parent.
+     * @ignore
+     */
+    getParent() {
+        Debug.deprecated('GraphNode#getParent is deprecated. Use GraphNode#parent instead.');
+        return this.parent;
+    }
+
+    /**
+     * @deprecated Use GraphNode#name instead.
+     * @param {string} name - The name to set.
+     * @ignore
+     */
+    setName(name) {
+        Debug.deprecated('GraphNode#setName is deprecated. Use GraphNode#name instead.');
+        this.name = name;
+    }
+
+    // ---- deprecated block end ----
 
     /**
      * Gets the depth of this child within the graph. Note that for performance reasons this is
@@ -741,7 +820,7 @@ class GraphNode extends EventHandler {
      * Important: The value returned by this function should be considered read-only. In order to
      * set the world space rotation of the graph node, use {@link setEulerAngles}.
      *
-     * @returns {Vec3} The world space rotation of the graph node in Euler angle form.
+     * @returns {Readonly<Vec3>} The world space rotation of the graph node in Euler angle form.
      * @example
      * const angles = this.entity.getEulerAngles();
      * angles.y = 180; // rotate the entity around Y by 180 degrees
@@ -759,7 +838,7 @@ class GraphNode extends EventHandler {
      * Important: The value returned by this function should be considered read-only. In order to
      * set the local space rotation of the graph node, use {@link setLocalEulerAngles}.
      *
-     * @returns {Vec3} The local space rotation of the graph node as Euler angles in XYZ order.
+     * @returns {Readonly<Vec3>} The local space rotation of the graph node as Euler angles in XYZ order.
      * @example
      * const angles = this.entity.getLocalEulerAngles();
      * angles.y = 180;
@@ -775,9 +854,9 @@ class GraphNode extends EventHandler {
      * {@link Vec3}. The returned vector should be considered read-only. To update the local
      * position, use {@link setLocalPosition}.
      *
-     * @returns {Vec3} The local space position of the graph node.
+     * @returns {Readonly<Vec3>} The local space position of the graph node.
      * @example
-     * const position = this.entity.getLocalPosition();
+     * const position = this.entity.getLocalPosition().clone();
      * position.x += 1; // move the entity 1 unit along x.
      * this.entity.setLocalPosition(position);
      */
@@ -790,7 +869,7 @@ class GraphNode extends EventHandler {
      * {@link Quat}. The returned quaternion should be considered read-only. To update the local
      * rotation, use {@link setLocalRotation}.
      *
-     * @returns {Quat} The local space rotation of the graph node as a quaternion.
+     * @returns {Readonly<Quat>} The local space rotation of the graph node as a quaternion.
      * @example
      * const rotation = this.entity.getLocalRotation();
      */
@@ -803,9 +882,9 @@ class GraphNode extends EventHandler {
      * {@link Vec3}. The returned vector should be considered read-only. To update the local scale,
      * use {@link setLocalScale}.
      *
-     * @returns {Vec3} The local space scale of the graph node.
+     * @returns {Readonly<Vec3>} The local space scale of the graph node.
      * @example
-     * const scale = this.entity.getLocalScale();
+     * const scale = this.entity.getLocalScale().clone();
      * scale.x = 100;
      * this.entity.setLocalScale(scale);
      */
@@ -817,7 +896,7 @@ class GraphNode extends EventHandler {
      * Get the local transform matrix for this graph node. This matrix is the transform relative to
      * the node's parent's world transformation matrix.
      *
-     * @returns {Mat4} The node's local transformation matrix.
+     * @returns {Readonly<Mat4>} The node's local transformation matrix.
      * @example
      * const transform = this.entity.getLocalTransform();
      */
@@ -834,9 +913,9 @@ class GraphNode extends EventHandler {
      * {@link Vec3}. The value returned by this function should be considered read-only. In order
      * to set the world space position of the graph node, use {@link setPosition}.
      *
-     * @returns {Vec3} The world space position of the graph node.
+     * @returns {Readonly<Vec3>} The world space position of the graph node.
      * @example
-     * const position = this.entity.getPosition();
+     * const position = this.entity.getPosition().clone();
      * position.x = 10;
      * this.entity.setPosition(position);
      */
@@ -850,7 +929,7 @@ class GraphNode extends EventHandler {
      * {@link Quat}. The value returned by this function should be considered read-only. In order
      * to set the world space rotation of the graph node, use {@link setRotation}.
      *
-     * @returns {Quat} The world space rotation of the graph node as a quaternion.
+     * @returns {Readonly<Quat>} The world space rotation of the graph node as a quaternion.
      * @example
      * const rotation = this.entity.getRotation();
      */
@@ -867,7 +946,7 @@ class GraphNode extends EventHandler {
      * read-only. Note that it is not possible to set the world space scale of a graph node
      * directly.
      *
-     * @returns {Vec3} The world space scale of the graph node.
+     * @returns {Readonly<Vec3>} The world space scale of the graph node.
      * @example
      * const scale = this.entity.getScale();
      * @ignore
@@ -882,7 +961,7 @@ class GraphNode extends EventHandler {
     /**
      * Get the world transformation matrix for this graph node.
      *
-     * @returns {Mat4} The node's world transformation matrix.
+     * @returns {Readonly<Mat4>} The node's world transformation matrix.
      * @example
      * const transform = this.entity.getWorldTransform();
      */
@@ -961,7 +1040,7 @@ class GraphNode extends EventHandler {
      * @returns {void}
      * @example
      * // Set rotation of 90 degrees around y-axis via a vector
-     * const angles = new pc.Vec3(0, 90, 0);
+     * const angles = new Vec3(0, 90, 0);
      * this.entity.setLocalEulerAngles(angles);
      */
     /**
@@ -995,7 +1074,7 @@ class GraphNode extends EventHandler {
      * @param {Vec3} position - Vector holding local space position.
      * @returns {void}
      * @example
-     * const pos = new pc.Vec3(0, 10, 0);
+     * const pos = new Vec3(0, 10, 0);
      * this.entity.setLocalPosition(pos);
      */
     /**
@@ -1034,7 +1113,7 @@ class GraphNode extends EventHandler {
      * @param {Quat} rotation - Quaternion holding local space rotation.
      * @returns {void}
      * @example
-     * const q = new pc.Quat();
+     * const q = new Quat();
      * this.entity.setLocalRotation(q);
      */
     /**
@@ -1073,7 +1152,7 @@ class GraphNode extends EventHandler {
      * @param {Vec3} scale - Vector holding local space scale.
      * @returns {void}
      * @example
-     * const scale = new pc.Vec3(10, 10, 10);
+     * const scale = new Vec3(10, 10, 10);
      * this.entity.setLocalScale(scale);
      */
     /**
@@ -1100,6 +1179,22 @@ class GraphNode extends EventHandler {
             if (!this._dirtyWorld) {
                 this._dirtifyWorld();
             }
+        }
+    }
+
+    /**
+     * Marks this node and its ancestors as having a skinned or morphed mesh instance rendered in
+     * the frame with the given render version. The walk stops at the first node already marked in
+     * this frame, so only the first mesh instance of a hierarchy walks up to the root.
+     *
+     * @param {number} renderVersion - The render version of the current frame.
+     * @ignore
+     */
+    markDeformedRendered(renderVersion) {
+        let node = this;
+        while (node && node._deformedRenderVersion !== renderVersion) {
+            node._deformedRenderVersion = renderVersion;
+            node = node._parent;
         }
     }
 
@@ -1154,7 +1249,7 @@ class GraphNode extends EventHandler {
      * @param {Vec3} position - Vector holding world space position.
      * @returns {void}
      * @example
-     * const position = new pc.Vec3(0, 10, 0);
+     * const position = new Vec3(0, 10, 0);
      * this.entity.setPosition(position);
      */
     /**
@@ -1200,7 +1295,7 @@ class GraphNode extends EventHandler {
      * @param {Quat} rotation - Quaternion holding world space rotation.
      * @returns {void}
      * @example
-     * const rotation = new pc.Quat();
+     * const rotation = new Quat();
      * this.entity.setRotation(rotation);
      */
     /**
@@ -1236,8 +1331,8 @@ class GraphNode extends EventHandler {
      * @param {Vec3} position - The world space position to set.
      * @param {Quat} rotation - The world space rotation to set.
      * @example
-     * const position = new pc.Vec3(0, 10, 0);
-     * const rotation = new pc.Quat().setFromEulerAngles(0, 90, 0);
+     * const position = new Vec3(0, 10, 0);
+     * const rotation = new Quat().setFromEulerAngles(0, 90, 0);
      * this.entity.setPositionAndRotation(position, rotation);
      */
     setPositionAndRotation(position, rotation) {
@@ -1276,7 +1371,7 @@ class GraphNode extends EventHandler {
      * @param {Vec3} angles - Vector holding rotations around world space axes in degrees.
      * @returns {void}
      * @example
-     * const angles = new pc.Vec3(0, 90, 0);
+     * const angles = new Vec3(0, 90, 0);
      * this.entity.setEulerAngles(angles);
      */
     /**
@@ -1302,9 +1397,13 @@ class GraphNode extends EventHandler {
      * Add a new child to the child list and update the parent value of the child node.
      * If the node already had a parent, it is removed from its child list.
      *
+     * The child keeps its existing local transform, which is now interpreted relative to the new
+     * parent, so a node placed in world space before being added will appear to move. Set the
+     * transform after adding, or re-apply the world placement with {@link GraphNode#setPosition}.
+     *
      * @param {GraphNode} node - The new child to add.
      * @example
-     * const e = new pc.Entity(app);
+     * const e = new Entity(app);
      * this.entity.addChild(e);
      */
     addChild(node) {
@@ -1319,7 +1418,7 @@ class GraphNode extends EventHandler {
      *
      * @param {GraphNode} node - The child to add.
      * @example
-     * const e = new pc.Entity(app);
+     * const e = new Entity(app);
      * this.entity.addChildAndSaveTransform(e);
      * @ignore
      */
@@ -1344,7 +1443,7 @@ class GraphNode extends EventHandler {
      * @param {number} index - The index in the child list of the parent where the new node will be
      * inserted.
      * @example
-     * const e = new pc.Entity(app);
+     * const e = new Entity(app);
      * this.entity.insertChild(e, 1);
      */
     insertChild(node, index) {
@@ -1437,6 +1536,10 @@ class GraphNode extends EventHandler {
 
     /**
      * Remove the node from the child list and update the parent value of the child.
+     *
+     * This detaches the node without disabling it: the removed subtree still reports
+     * `enabled === true`, and its lights, cameras, scripts and sounds keep running. Set
+     * `enabled = false` to deactivate a node, or destroy the entity to remove it outright.
      *
      * @param {GraphNode} child - The node to remove.
      * @example
@@ -1556,6 +1659,11 @@ class GraphNode extends EventHandler {
     /**
      * Reorients the graph node so that the negative z-axis points towards the target.
      *
+     * The up vector must not be parallel to the direction from the node to the target. When it is —
+     * looking straight up or down with the default up vector, or at the node's own position — the
+     * basis is degenerate and the node's rotation is reset to identity, discarding whatever
+     * rotation it already had, with nothing reported. Pass a different up vector in those cases.
+     *
      * @overload
      * @param {number} x - X-component of the world space coordinate to look at.
      * @param {number} y - Y-component of the world space coordinate to look at.
@@ -1585,7 +1693,7 @@ class GraphNode extends EventHandler {
      * @example
      * // Look at another entity, using the negative world y-axis for up
      * const target = otherEntity.getPosition();
-     * this.entity.lookAt(target, pc.Vec3.DOWN);
+     * this.entity.lookAt(target, Vec3.DOWN);
      */
     /**
      * @param {number|Vec3} x - If passing a 3D vector, this is the world space coordinate to look at.
@@ -1636,7 +1744,7 @@ class GraphNode extends EventHandler {
      * @param {Vec3} translation - Vector holding world space translation.
      * @returns {void}
      * @example
-     * const translation = new pc.Vec3(10, 0, 0);
+     * const translation = new Vec3(10, 0, 0);
      * this.entity.translate(translation);
      */
     /**
@@ -1673,7 +1781,7 @@ class GraphNode extends EventHandler {
      * @param {Vec3} translation - Vector holding local space translation.
      * @returns {void}
      * @example
-     * const t = new pc.Vec3(10, 0, 0);
+     * const t = new Vec3(10, 0, 0);
      * this.entity.translateLocal(t);
      */
     /**
@@ -1716,7 +1824,7 @@ class GraphNode extends EventHandler {
      * @param {Vec3} rotation - Vector holding world space rotation.
      * @returns {void}
      * @example
-     * const rotation = new pc.Vec3(0, 90, 0);
+     * const rotation = new Vec3(0, 90, 0);
      * this.entity.rotate(rotation);
      */
     /**
@@ -1763,7 +1871,7 @@ class GraphNode extends EventHandler {
      * @param {Vec3} rotation - Vector holding local space rotation.
      * @returns {void}
      * @example
-     * const rotation = new pc.Vec3(0, 90, 0);
+     * const rotation = new Vec3(0, 90, 0);
      * this.entity.rotateLocal(rotation);
      */
     /**

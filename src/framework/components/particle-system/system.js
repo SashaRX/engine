@@ -1,10 +1,10 @@
+import { Debug } from '../../../core/debug.js';
 import { Curve } from '../../../core/math/curve.js';
 import { CurveSet } from '../../../core/math/curve-set.js';
 import { Vec3 } from '../../../core/math/vec3.js';
 import { Asset } from '../../asset/asset.js';
 import { ComponentSystem } from '../system.js';
-import { ParticleSystemComponent } from './component.js';
-import { ParticleSystemComponentData } from './data.js';
+import { _properties, ParticleSystemComponent } from './component.js';
 import { particleChunksGLSL } from '../../../scene/shader-lib/glsl/collections/particle-chunks-glsl.js';
 import { particleChunksWGSL } from '../../../scene/shader-lib/wgsl/collections/particle-chunks-wgsl.js';
 import { SHADERLANGUAGE_GLSL, SHADERLANGUAGE_WGSL } from '../../../platform/graphics/constants.js';
@@ -12,76 +12,92 @@ import { ShaderChunks } from '../../../scene/shader-lib/shader-chunks.js';
 
 /**
  * @import { AppBase } from '../../app-base.js'
+ * @import { Entity } from '../../entity.js'
+ * @import { Mesh } from '../../../scene/mesh.js'
  */
 
-const _schema = [
-    'enabled',
-    'autoPlay',
-    'numParticles',
-    'lifetime',
-    'rate',
-    'rate2',
-    'startAngle',
-    'startAngle2',
-    'loop',
-    'preWarm',
-    'lighting',
-    'halfLambert',
-    'intensity',
-    'depthWrite',
-    'noFog',
-    'depthSoftening',
-    'sort',
-    'blendType',
-    'stretch',
-    'alignToMotion',
-    'emitterShape',
-    'emitterExtents',
-    'emitterExtentsInner',
-    'emitterRadius',
-    'emitterRadiusInner',
-    'initialVelocity',
-    'wrap',
-    'wrapBounds',
-    'localSpace',
-    'screenSpace',
-    'colorMapAsset',
-    'normalMapAsset',
-    'mesh',
-    'meshAsset',
-    'renderAsset',
-    'orientation',
-    'particleNormal',
-    'localVelocityGraph',
-    'localVelocityGraph2',
-    'velocityGraph',
-    'velocityGraph2',
-    'rotationSpeedGraph',
-    'rotationSpeedGraph2',
-    'radialSpeedGraph',
-    'radialSpeedGraph2',
-    'scaleGraph',
-    'scaleGraph2',
-    'colorGraph',
-    'colorGraph2',
-    'alphaGraph',
-    'alphaGraph2',
-    'colorMap',
-    'normalMap',
-    'animTilesX',
-    'animTilesY',
-    'animStartFrame',
-    'animNumFrames',
-    'animNumAnimations',
-    'animIndex',
-    'randomizeAnimIndex',
-    'animSpeed',
-    'animLoop',
-    'layers'
-];
+/**
+ * Options of the `particlesystem` component accepted by {@link ParticleSystemComponentSystem} that
+ * differ from the properties of {@link ParticleSystemComponent}. Each replaces the same-named
+ * property of the options that {@link Entity#addComponent} derives from the component class; see
+ * {@link ComponentOptionsOverrides}.
+ *
+ * @typedef {object} ParticleSystemComponentOptionsOverrides
+ * @property {Curve | { type?: number, keys: number[] }} [alphaGraph] - Same as
+ * {@link ParticleSystemComponent#alphaGraph}, also accepting plain `{ type, keys }` curve data.
+ * @property {Curve | { type?: number, keys: number[] }} [alphaGraph2] - Same as
+ * {@link ParticleSystemComponent#alphaGraph2}, also accepting plain `{ type, keys }` curve data.
+ * @property {CurveSet | { type?: number, keys: number[][] }} [colorGraph] - Same as
+ * {@link ParticleSystemComponent#colorGraph}, also accepting plain `{ type, keys }` curve set data.
+ * @property {CurveSet | { type?: number, keys: number[][] }} [colorGraph2] - Same as
+ * {@link ParticleSystemComponent#colorGraph2}, also accepting plain `{ type, keys }` curve set
+ * data.
+ * @property {Vec3 | number[]} [emitterExtents] - Same as
+ * {@link ParticleSystemComponent#emitterExtents}, also accepting an `[x, y, z]` array.
+ * @property {Vec3 | number[]} [emitterExtentsInner] - Same as
+ * {@link ParticleSystemComponent#emitterExtentsInner}, also accepting an `[x, y, z]` array.
+ * @property {CurveSet | { type?: number, keys: number[][] }} [localVelocityGraph] - Same as
+ * {@link ParticleSystemComponent#localVelocityGraph}, also accepting plain `{ type, keys }` curve
+ * set data.
+ * @property {CurveSet | { type?: number, keys: number[][] }} [localVelocityGraph2] - Same as
+ * {@link ParticleSystemComponent#localVelocityGraph2}, also accepting plain `{ type, keys }` curve
+ * set data.
+ * @property {Mesh | Asset | number} [mesh] - Same as {@link ParticleSystemComponent#mesh}. An
+ * {@link Asset} or asset id is assigned to {@link ParticleSystemComponent#meshAsset} instead.
+ * @property {Vec3 | number[]} [particleNormal] - Same as
+ * {@link ParticleSystemComponent#particleNormal}, also accepting an `[x, y, z]` array.
+ * @property {Curve | { type?: number, keys: number[] }} [radialSpeedGraph] - Same as
+ * {@link ParticleSystemComponent#radialSpeedGraph}, also accepting plain `{ type, keys }` curve
+ * data.
+ * @property {Curve | { type?: number, keys: number[] }} [radialSpeedGraph2] - Same as
+ * {@link ParticleSystemComponent#radialSpeedGraph2}, also accepting plain `{ type, keys }` curve
+ * data.
+ * @property {Curve | { type?: number, keys: number[] }} [rotationSpeedGraph] - Same as
+ * {@link ParticleSystemComponent#rotationSpeedGraph}, also accepting plain `{ type, keys }` curve
+ * data.
+ * @property {Curve | { type?: number, keys: number[] }} [rotationSpeedGraph2] - Same as
+ * {@link ParticleSystemComponent#rotationSpeedGraph2}, also accepting plain `{ type, keys }` curve
+ * data.
+ * @property {Curve | { type?: number, keys: number[] }} [scaleGraph] - Same as
+ * {@link ParticleSystemComponent#scaleGraph}, also accepting plain `{ type, keys }` curve data.
+ * @property {Curve | { type?: number, keys: number[] }} [scaleGraph2] - Same as
+ * {@link ParticleSystemComponent#scaleGraph2}, also accepting plain `{ type, keys }` curve data.
+ * @property {CurveSet | { type?: number, keys: number[][] }} [velocityGraph] - Same as
+ * {@link ParticleSystemComponent#velocityGraph}, also accepting plain `{ type, keys }` curve set
+ * data.
+ * @property {CurveSet | { type?: number, keys: number[][] }} [velocityGraph2] - Same as
+ * {@link ParticleSystemComponent#velocityGraph2}, also accepting plain `{ type, keys }` curve set
+ * data.
+ * @property {Vec3 | number[]} [wrapBounds] - Same as {@link ParticleSystemComponent#wrapBounds},
+ * also accepting an `[x, y, z]` array.
+ * @ignore
+ */
+
+const _propertyTypes = {
+    emitterExtents: 'vec3',
+    emitterExtentsInner: 'vec3',
+    particleNormal: 'vec3',
+    wrapBounds: 'vec3',
+    localVelocityGraph: 'curveset',
+    localVelocityGraph2: 'curveset',
+    velocityGraph: 'curveset',
+    velocityGraph2: 'curveset',
+    colorGraph: 'curveset',
+    colorGraph2: 'curveset',
+    alphaGraph: 'curve',
+    alphaGraph2: 'curve',
+    rotationSpeedGraph: 'curve',
+    rotationSpeedGraph2: 'curve',
+    radialSpeedGraph: 'curve',
+    radialSpeedGraph2: 'curve',
+    scaleGraph: 'curve',
+    scaleGraph2: 'curve'
+};
 
 /**
- * Allows an Entity to render a particle system.
+ * Manages the {@link ParticleSystemComponent}s of an application. Reach it through
+ * `app.systems.particlesystem`; components are created with {@link Entity#addComponent}, never by
+ * calling the system directly.
  *
  * @category Graphics
  */
@@ -98,30 +114,6 @@ class ParticleSystemComponentSystem extends ComponentSystem {
         this.id = 'particlesystem';
 
         this.ComponentType = ParticleSystemComponent;
-        this.DataType = ParticleSystemComponentData;
-
-        this.schema = _schema;
-
-        this.propertyTypes = {
-            emitterExtents: 'vec3',
-            emitterExtentsInner: 'vec3',
-            particleNormal: 'vec3',
-            wrapBounds: 'vec3',
-            localVelocityGraph: 'curveset',
-            localVelocityGraph2: 'curveset',
-            velocityGraph: 'curveset',
-            velocityGraph2: 'curveset',
-            colorGraph: 'curveset',
-            colorGraph2: 'curveset',
-            alphaGraph: 'curve',
-            alphaGraph2: 'curve',
-            rotationSpeedGraph: 'curve',
-            rotationSpeedGraph2: 'curve',
-            radialSpeedGraph: 'curve',
-            radialSpeedGraph2: 'curve',
-            scaleGraph: 'curve',
-            scaleGraph2: 'curve'
-        };
 
         this.on('beforeremove', this.onBeforeRemove, this);
         this.app.systems.on('update', this.onUpdate, this);
@@ -131,75 +123,87 @@ class ParticleSystemComponentSystem extends ComponentSystem {
         ShaderChunks.get(app.graphicsDevice, SHADERLANGUAGE_WGSL).add(particleChunksWGSL);
     }
 
-    initializeComponentData(component, _data, properties) {
-        const data = {};
-
-        properties = [];
-        const types = this.propertyTypes;
+    initializeComponentData(component, _data) {
+        // duplicate input data as we are modifying it
+        const data = { ..._data };
 
         // we store the mesh asset id as "mesh" (it should be "meshAsset")
         // this re-maps "mesh" into "meshAsset" if it is an asset or an asset id
-        if (_data.mesh instanceof Asset || typeof _data.mesh === 'number') {
+        if (data.mesh instanceof Asset || typeof data.mesh === 'number') {
             // migrate into meshAsset property
-            _data.meshAsset = _data.mesh;
-            delete _data.mesh;
+            data.meshAsset = data.mesh;
+            delete data.mesh;
         }
 
-        for (const prop in _data) {
-            if (_data.hasOwnProperty(prop)) {
-                properties.push(prop);
-                // duplicate input data as we are modifying it
-                data[prop] = _data[prop];
-            }
+        // 'noFog' was replaced by 'useFog' - migrate legacy data, letting an explicit 'useFog' win
+        if (data.noFog !== undefined) {
+            Debug.deprecated('ParticleSystemComponent#noFog is deprecated. Use ParticleSystemComponent#useFog instead.');
+            if (data.useFog === undefined) data.useFog = !data.noFog;
+            delete data.noFog;
+        }
 
-            if (types[prop] === 'vec3') {
+        for (const prop in data) {
+            if (data[prop] === undefined || data[prop] === null) continue;
+
+            const type = _propertyTypes[prop];
+            if (type === 'vec3') {
                 if (Array.isArray(data[prop])) {
                     data[prop] = new Vec3(data[prop][0], data[prop][1], data[prop][2]);
                 }
-            } else if (types[prop] === 'curve') {
+            } else if (type === 'curve') {
                 if (!(data[prop] instanceof Curve)) {
                     const t = data[prop].type;
                     data[prop] = new Curve(data[prop].keys);
                     data[prop].type = t;
                 }
-            } else if (types[prop] === 'curveset') {
+            } else if (type === 'curveset') {
                 if (!(data[prop] instanceof CurveSet)) {
                     const t = data[prop].type;
                     data[prop] = new CurveSet(data[prop].keys);
                     data[prop].type = t;
                 }
             }
+        }
 
-            // duplicate layer list
-            if (data.layers && Array.isArray(data.layers)) {
-                data.layers = data.layers.slice(0);
+        // duplicate layer list
+        if (data.layers && Array.isArray(data.layers)) {
+            data.layers = data.layers.slice(0);
+        }
+
+        // store the enabled state before applying the other properties, so that
+        // initialization-time side effects in their setters (e.g. asset loading)
+        // respect the intended enabled state. Written to the backing field directly
+        // to avoid firing enable/disable events before initialization completes.
+        if (data.enabled !== undefined) {
+            component._enabled = data.enabled;
+        }
+
+        for (let i = 0; i < _properties.length; i++) {
+            const property = _properties[i];
+            if (data[property] !== undefined) {
+                component[property] = data[property];
             }
         }
 
-        super.initializeComponentData(component, data, properties);
+        super.initializeComponentData(component, data);
     }
 
     cloneComponent(entity, clone) {
-        const source = entity.particlesystem.data;
-        const schema = this.schema;
+        const c = entity.particlesystem;
 
-        const data = {};
+        const data = {
+            enabled: c.enabled
+        };
 
-        for (let i = 0, len = schema.length; i < len; i++) {
-            const prop = schema[i];
-            let sourceProp = source[prop];
-            if (sourceProp instanceof Vec3 ||
-                sourceProp instanceof Curve ||
-                sourceProp instanceof CurveSet) {
-
-                sourceProp = sourceProp.clone();
-                data[prop] = sourceProp;
+        for (let i = 0; i < _properties.length; i++) {
+            const prop = _properties[i];
+            const value = c[prop];
+            if (value instanceof Vec3 || value instanceof Curve || value instanceof CurveSet) {
+                data[prop] = value.clone();
             } else if (prop === 'layers') {
-                data.layers = source.layers.slice(0);
-            } else {
-                if (sourceProp !== null && sourceProp !== undefined) {
-                    data[prop] = sourceProp;
-                }
+                data.layers = value.slice(0);
+            } else if (value !== null && value !== undefined) {
+                data[prop] = value;
             }
         }
 
@@ -218,17 +222,16 @@ class ParticleSystemComponentSystem extends ComponentSystem {
 
         for (const id in components) {
             if (components.hasOwnProperty(id)) {
-                const component = components[id];
+                const component = components[id].entity.particlesystem;
                 const entity = component.entity;
-                const data = component.data;
 
-                if (data.enabled && entity.enabled) {
-                    const emitter = entity.particlesystem.emitter;
+                if (component.enabled && entity.enabled) {
+                    const emitter = component.emitter;
                     if (!emitter?.meshInstance.visible) continue;
 
                     // if emitter is using lighting, enable light cube on all layers it is assigned to
                     if (emitter.lighting) {
-                        const layers = data.layers;
+                        const layers = component.layers;
                         for (let i = 0; i < layers.length; i++) {
                             const layer = composition.getLayerById(layers[i]);
                             if (layer) {
@@ -237,7 +240,7 @@ class ParticleSystemComponentSystem extends ComponentSystem {
                         }
                     }
 
-                    if (!data.paused) {
+                    if (!component._paused) {
                         let numSteps = 0;
                         emitter.simTime += dt;
                         if (emitter.simTime >= emitter.fixedTimeStep) {

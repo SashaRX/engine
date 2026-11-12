@@ -36,11 +36,9 @@ const standardMaterialParameterTypes = {
     vertexColorGamma: 'boolean',
 
     specular: 'rgb',
-    specularTint: 'boolean',
     ..._textureParameter('specular'),
     occludeSpecular: 'enum:occludeSpecular',
     specularityFactor: 'number',
-    specularityFactorTint: 'boolean',
     ..._textureParameter('specularityFactor'),
 
     useMetalness: 'boolean',
@@ -74,6 +72,11 @@ const standardMaterialParameterTypes = {
     sheenGlossInvert: 'boolean',
     ..._textureParameter('sheenGloss'),
 
+    diffuseTransmission: 'number',
+    ..._textureParameter('diffuseTransmission'),
+    diffuseTransmissionColor: 'rgb',
+    ..._textureParameter('diffuseTransmissionColor'),
+
     fresnelModel: 'number',
 
     emissive: 'rgb',
@@ -88,10 +91,15 @@ const standardMaterialParameterTypes = {
 
     ..._textureParameter('height', true, false),
     heightMapFactor: 'number',
+    heightMapBase: 'number',
+    parallaxMode: 'string',
+    parallaxSamples: 'number',
+    parallaxShadowSamples: 'number',
 
     alphaToCoverage: 'boolean',
     alphaTest: 'number',
     alphaFade: 'number',
+    alphaDither: 'number',
     opacity: 'number',
     ..._textureParameter('opacity'),
     opacityFadesSpecular: 'boolean',
@@ -144,6 +152,7 @@ const standardMaterialParameterTypes = {
     envAtlas: 'texture',
 
     twoSidedLighting: 'boolean',
+    flatShading: 'boolean',
     shadowCatcher: 'boolean'
 
     // nineSlicedMode
@@ -193,11 +202,13 @@ const standardMaterialRemovedParameters = {
     ambientTint: 'boolean',
     emissiveTint: 'boolean',
     diffuseTint: 'boolean',
+    specularTint: 'boolean',
     sheenTint: 'boolean',
     conserveEnergy: 'boolean',
     useGamma: 'boolean',
     useGammaTonemap: 'boolean',
     sheenGlossTint: 'boolean',
+    specularityFactorTint: 'boolean',
     anisotropy: 'boolean'
 };
 

@@ -1,6 +1,6 @@
 import { Debug } from '../../core/debug.js';
 import { hashCode } from '../../core/hash.js';
-import { SEMANTIC_POSITION, getGlslShaderType } from '../../platform/graphics/constants.js';
+import { RENDERTARGET_ORIGIN_BOTTOM, SEMANTIC_POSITION, getGlslShaderType } from '../../platform/graphics/constants.js';
 import { BlendState } from '../../platform/graphics/blend-state.js';
 import { RenderTarget } from '../../platform/graphics/render-target.js';
 import { QuadRender } from '../../scene/graphics/quad-render.js';
@@ -58,7 +58,7 @@ import wgslGsplatProcess from '../../scene/shader-lib/wgsl/chunks/gsplat/frag/gs
  *
  * @example
  * // Create a processor that reads splat positions and writes to a customColor texture
- * const processor = new pc.GSplatProcessor(
+ * const processor = new GSplatProcessor(
  *     app.graphicsDevice,
  *     { component: entity.gsplat },  // source: all streams auto-bound
  *     { component: entity.gsplat, streams: ['customColor'] }, // destination: customColor stream only
@@ -267,8 +267,6 @@ class GSplatProcessor {
         this._renderPass = new RenderPassShaderQuad(device);
         this._renderPass.quadRender = this._quadRender;
         this._renderPass.init(this._renderTarget);
-        this._renderPass.colorOps.clear = false;
-        this._renderPass.depthStencilOps.clearDepth = false;
     }
 
     /**
@@ -343,7 +341,7 @@ class GSplatProcessor {
                 name: 'GSplatProcessor-MRT',
                 colorBuffers: colorBuffers,
                 depth: false,
-                flipY: true
+                origin: RENDERTARGET_ORIGIN_BOTTOM
             });
         }
     }
@@ -393,7 +391,7 @@ class GSplatProcessor {
             return info.returnType;
         });
 
-        // Create defines - start from the source resource's format-specific defines (e.g. SOG_V2)
+        // Create defines - start from the source resource's format-specific defines (e.g. SOG_VERSION)
         // so the shared read chunk compiles for the correct variant, then override SH_BANDS.
         const defines = new Map();
         this._srcResource.configureMaterialDefines(defines);

@@ -1,3 +1,6 @@
+/** @import { editor } from 'monaco-editor' */
+
+/** @type {editor.IStandaloneThemeData} */
 export const playcanvasTheme = {
     base: 'vs-dark',
     inherit: true,
@@ -8,6 +11,6 @@ export const playcanvasTheme = {
         }
     ],
     colors: {
-        'editor.background': '#1d292c'
+        'editor.background': '#161c1e'
     }
 };

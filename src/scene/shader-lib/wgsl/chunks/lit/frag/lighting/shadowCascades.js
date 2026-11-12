@@ -4,7 +4,7 @@ export default /* wgsl */`
 fn getShadowCascadeIndex(shadowCascadeDistances: vec4f, shadowCascadeCount: i32) -> i32 {
 
     // depth in 0 .. far plane range
-    let depth: f32 = 1.0 / pcPosition.w;
+    let depth: f32 = dViewDepth;
 
     // 1.0 if depth >= distance, 0.0 otherwise
     let comparisons: vec4f = step(shadowCascadeDistances, vec4f(depth));
@@ -24,7 +24,7 @@ fn ditherShadowCascadeIndex(cascadeIndex_in: i32, shadowCascadeDistances: vec4f,
     if (cascadeIndex < shadowCascadeCount - 1) {
         let currentRangeEnd: f32 = shadowCascadeDistances[cascadeIndex];
         let transitionStart: f32 = blendFactor * currentRangeEnd; // Start overlap factor away from the end distance
-        let depth: f32 = 1.0 / pcPosition.w;
+        let depth: f32 = dViewDepth;
 
         if (depth > transitionStart) {
             // Calculate a transition factor (0.0 to 1.0) within the overlap range
@@ -42,15 +42,4 @@ fn ditherShadowCascadeIndex(cascadeIndex_in: i32, shadowCascadeDistances: vec4f,
     return cascadeIndex;
 }
 
-fn fadeShadow(shadowCoord_in: vec3f, shadowCascadeDistances: vec4f) -> vec3f {
-    // if the pixel is past the shadow distance, remove shadow
-    // this enforces straight line instead of corner of shadow which moves when camera rotates
-    var shadowCoord: vec3f = shadowCoord_in;
-    let depth: f32 = 1.0 / pcPosition.w;
-    if (depth > shadowCascadeDistances.w) {
-        shadowCoord.z = -9999999.0;
-    }
-
-    return shadowCoord;
-}
 `;

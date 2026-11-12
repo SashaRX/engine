@@ -68,6 +68,7 @@ const vec = new Vec3();
  * - Per-annotation rendering resources (entities, materials, DOM elements)
  * - Tooltip DOM elements
  * - Hover and click interactions
+ * @category Annotations
  */
 export class AnnotationManager extends Script {
     static scriptName = 'annotationManager';
@@ -904,11 +905,11 @@ export class AnnotationManager extends Script {
                 this._updateAnnotationPositions(annotation, resources, screenPos);
                 this._updateAnnotationRotationAndScale(annotation, -vec.z);
 
-                // Update material opacity
+                // Update material opacity, applied by update() as the value lives in the material uniform buffer
                 resources.materials[0].opacity = this._opacity;
                 resources.materials[1].opacity = this._behindOpacity * this._opacity;
-                resources.materials[0].setParameter('material_opacity', this._opacity);
-                resources.materials[1].setParameter('material_opacity', this._behindOpacity * this._opacity);
+                resources.materials[0].update();
+                resources.materials[1].update();
             }
         };
         this.app.on('prerender', prerenderHandler);
@@ -974,6 +975,7 @@ export class AnnotationManager extends Script {
  * - `hover` - when hover state changes
  * - `show` - when tooltip is shown
  * - `hide` - when tooltip is hidden
+ * @category Annotations
  */
 export class Annotation extends Script {
     static scriptName = 'annotation';

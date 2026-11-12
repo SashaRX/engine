@@ -7,14 +7,14 @@
 [![Reddit](https://img.shields.io/badge/Reddit-FF4500?style=flat&logo=reddit&logoColor=white&color=black)](https://www.reddit.com/r/PlayCanvas)
 [![X](https://img.shields.io/badge/X-000000?style=flat&logo=x&logoColor=white&color=black)](https://x.com/intent/follow?screen_name=playcanvas)
 
-| [用户手册](https://developer.playcanvas.com/user-manual/engine/) | [API 参考](https://api.playcanvas.com/engine/) | [例子](https://playcanvas.github.io) | [博客](https://blog.playcanvas.com) | [论坛](https://forum.playcanvas.com) |
+| [用户手册](https://developer.playcanvas.com/user-manual/engine/) | [API 参考](https://api.playcanvas.com/engine/) | [例子](https://playcanvas.com/examples/) | [博客](https://blog.playcanvas.com) | [论坛](https://forum.playcanvas.com) |
 
 PlayCanvas 是一款基于 WebGL2 和 WebGPU 构建的开源游戏引擎。使用它可以创建在任何浏览器和任何设备上运行的交互式 3D 应用、游戏和可视化内容。
 
-[English](https://github.com/playcanvas/engine/blob/dev/README.md)
-[中文](https://github.com/playcanvas/engine/blob/dev/README-zh.md)
-[日本語](https://github.com/playcanvas/engine/blob/dev/README-ja.md)
-[한글](https://github.com/playcanvas/engine/blob/dev/README-kr.md)
+[English](https://github.com/playcanvas/engine/blob/main/README.md)
+[中文](https://github.com/playcanvas/engine/blob/main/README-zh.md)
+[日本語](https://github.com/playcanvas/engine/blob/main/README-ja.md)
+[한글](https://github.com/playcanvas/engine/blob/main/README-kr.md)
 
 ## 安装
 
@@ -97,6 +97,10 @@ PlayCanvas 是一款优秀的全功能游戏引擎。
 - 🔊 **声音** - 基于 Web Audio API 的 3D 音效
 - 📦 **资源** - 使用 [glTF 2.0](https://www.khronos.org/gltf/), [Draco](https://google.github.io/draco/) 以及 [Basis](https://github.com/BinomialLLC/basis_universal) 的异步流媒体系统
 - 📜 **代码** - 支持 TypeScript 以及 JavaScript
+
+## 使用 AI 进行开发
+
+编码智能体请从[引擎指南索引](https://developer.playcanvas.com/user-manual/engine/llms.txt)和[引擎 API 索引](https://api.playcanvas.com/engine/llms.txt)开始，两者都链接到每个页面的 Markdown 版本。[Developing with AI](https://developer.playcanvas.com/user-manual/engine/developing-with-ai/) 介绍了如何在项目中配置智能体。
 
 ## 生态系统
 

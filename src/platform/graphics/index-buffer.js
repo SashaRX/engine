@@ -1,12 +1,13 @@
 import { Debug } from '../../core/debug.js';
 import { TRACEID_VRAM_IB } from '../../core/constants.js';
+import { BufferUtils } from './buffer-utils.js';
 
 /**
  * @import { GraphicsDevice } from './graphics-device.js'
  */
 
 import {
-    BUFFER_STATIC, INDEXFORMAT_UINT16, INDEXFORMAT_UINT32, typedArrayIndexFormatsByteSize
+    BUFFER_STATIC, typedArrayIndexFormats, typedArrayIndexFormatsByteSize
 } from './constants.js';
 
 let id = 0;
@@ -37,19 +38,21 @@ class IndexBuffer {
      * - {@link BUFFER_STREAM}
      *
      * Defaults to {@link BUFFER_STATIC}.
-     * @param {ArrayBuffer} [initialData] - Initial data. If left unspecified, the index buffer
-     * will be initialized to zeros.
+     * @param {ArrayBuffer|ArrayBufferView} [initialData] - Initial data. Can be an
+     * {@link ArrayBuffer} or a typed array (for example a {@link Uint16Array}). The data is stored
+     * by reference and is not copied, so a typed array that is a view into a larger buffer is kept
+     * as-is. If left unspecified, the index buffer will be initialized to zeros.
      * @param {object} [options] - Object for passing optional arguments.
      * @param {boolean} [options.storage] - Defines if the index buffer can be used as a storage
      * buffer by a compute shader. Defaults to false. Only supported on WebGPU.
      * @example
      * // Create an index buffer holding 3 16-bit indices. The buffer is marked as
      * // static, hinting that the buffer will never be modified.
-     * const indices = new UInt16Array([0, 1, 2]);
-     * const indexBuffer = new pc.IndexBuffer(graphicsDevice,
-     *                                        pc.INDEXFORMAT_UINT16,
+     * const indices = new Uint16Array([0, 1, 2]);
+     * const indexBuffer = new IndexBuffer(graphicsDevice,
+     *                                        INDEXFORMAT_UINT16,
      *                                        3,
-     *                                        pc.BUFFER_STATIC,
+     *                                        BUFFER_STATIC,
      *                                        indices);
      */
     constructor(graphicsDevice, format, numIndices, usage = BUFFER_STATIC, initialData, options) {
@@ -147,27 +150,60 @@ class IndexBuffer {
     /**
      * Gives access to the block of memory that stores the buffer's indices.
      *
-     * @returns {ArrayBuffer} A contiguous block of memory where index data can be written to.
+     * @returns {ArrayBuffer|ArrayBufferView} The memory that stores the buffer's indices. This
+     * matches whatever was supplied as the initial data: an {@link ArrayBuffer} when none was
+     * provided, otherwise the {@link ArrayBuffer} or typed array that was passed in. Use
+     * {@link ArrayBuffer.isView} to distinguish the two before accessing it.
      */
     lock() {
         return this.storage;
     }
 
     /**
-     * Signals that the block of memory returned by a call to the lock function is ready to be
-     * given to the graphics hardware. Only unlocked index buffers can be set on the currently
-     * active device.
+     * Uploads the client side copy of the index buffer to the GPU. When called without arguments,
+     * uploads the entire buffer. An explicit range uploads only those bytes at the same GPU offset.
+     * The first upload always initializes the entire GPU buffer, regardless of the requested range.
+     * A zero byte length does nothing, including before the first upload.
+     *
+     * Partial uploads do not resize the buffer or change its CPU storage. The caller must upload
+     * every modified range before expecting those changes on the GPU. Context restoration uploads
+     * the entire CPU storage. Invalid ranges are ignored in all builds and report an assertion
+     * in debug builds.
+     *
+     * @param {number} [byteOffset] - Offset in bytes from the start of the buffer's storage.
+     * Defaults to 0. Must be a non-negative integer and a multiple of 4 on all graphics backends.
+     * @param {number} [byteLength] - Number of bytes to upload. Defaults to the remaining bytes
+     * after byteOffset. The length must be a non-negative integer and the range must fit within
+     * the buffer. Partial ranges require a length that is a multiple of 4. Full-buffer uploads
+     * support any byte length, whether the range is explicit or the arguments are omitted.
+     * @example
+     * // After modifying bytes 16 through 31 of the CPU storage:
+     * indexBuffer.unlock(16, 16);
      */
-    unlock() {
+    unlock(byteOffset, byteLength) {
+        if (byteOffset !== undefined || byteLength !== undefined) {
+            byteOffset ??= 0;
+            byteLength ??= this.numBytes - byteOffset;
 
-        // Upload the new index data
-        this.impl.unlock(this);
+            const fullRange = byteOffset === 0 && byteLength === this.numBytes;
+            const valid = Number.isInteger(byteOffset) && byteOffset >= 0 && byteOffset % 4 === 0 &&
+                Number.isInteger(byteLength) && byteLength >= 0 && (fullRange || byteLength % 4 === 0) &&
+                byteOffset + byteLength <= this.numBytes;
+            Debug.assert(valid, 'Buffer upload range must contain non-negative integers and fit within the buffer; partial ranges must be aligned to 4 bytes');
+
+            if (!valid || byteLength === 0) {
+                return;
+            }
+        }
+
+        this.impl.unlock(this, byteOffset, byteLength);
     }
 
     /**
      * Set preallocated data on the index buffer.
      *
-     * @param {ArrayBuffer} data - The index data to set.
+     * @param {ArrayBuffer|ArrayBufferView} data - The index data to set. Can be an
+     * {@link ArrayBuffer} or a typed array. Stored by reference, not copied.
      * @returns {boolean} True if the data was set successfully, false otherwise.
      * @ignore
      */
@@ -183,19 +219,6 @@ class IndexBuffer {
     }
 
     /**
-     * Get the appropriate typed array from an index buffer.
-     *
-     * @returns {Uint8Array|Uint16Array|Uint32Array} The typed array containing the index data.
-     * @private
-     */
-    _lockTypedArray() {
-        const lock = this.lock();
-        const indices = this.format === INDEXFORMAT_UINT32 ? new Uint32Array(lock) :
-            (this.format === INDEXFORMAT_UINT16 ? new Uint16Array(lock) : new Uint8Array(lock));
-        return indices;
-    }
-
-    /**
      * Copies the specified number of elements from data into index buffer. Optimized for
      * performance from both typed array as well as array.
      *
@@ -204,7 +227,7 @@ class IndexBuffer {
      * @ignore
      */
     writeData(data, count) {
-        const indices = this._lockTypedArray();
+        const indices = BufferUtils.createStorageView(this, typedArrayIndexFormats[this.format]);
 
         // if data contains more indices than needed, copy from its subarray
         if (data.length > count) {
@@ -236,12 +259,13 @@ class IndexBuffer {
      */
     readData(data) {
         // note: there is no need to unlock this buffer, as we are only reading from it
-        const indices = this._lockTypedArray();
+        const indices = BufferUtils.createStorageView(this, typedArrayIndexFormats[this.format]);
         const count = this.numIndices;
 
         if (ArrayBuffer.isView(data)) {
-            // destination data is typed array
-            data.set(indices);
+            // destination data is typed array, copy as much of the data as it can hold
+            Debug.assert(data.length >= count, 'Destination array is too small to receive all index data.');
+            data.set(data.length >= count ? indices : indices.subarray(0, data.length));
         } else {
             // data is array, copy right amount manually
             data.length = 0;

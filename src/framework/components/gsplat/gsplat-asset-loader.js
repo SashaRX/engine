@@ -54,20 +54,30 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
     _currentlyLoading = new Set();
 
     /**
-     * Queue of URLs waiting to be loaded.
+     * URLs waiting to be loaded, mapped to their load priority. The highest priority starts first,
+     * and as a Map keeps insertion order, equal priorities start in the order they were requested.
      *
-     * @type {string[]}
+     * @type {Map<string, number>}
      * @private
      */
-    _loadQueue = [];
+    _loadQueue = new Map();
 
     /**
-     * Map tracking retry attempts per URL.
+     * Map tracking retry attempts per URL, for genuine load errors only.
      *
      * @type {Map<string, number>}
      * @private
      */
     _retryCount = new Map();
+
+    /**
+     * Set of URLs whose load has genuinely, permanently failed: a real error (not a
+     * cancellation) was reported and retries are exhausted.
+     *
+     * @type {Set<string>}
+     * @private
+     */
+    _failed = new Set();
 
     /**
      * Whether this asset loader has been destroyed.
@@ -108,9 +118,10 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
         }
 
         this._urlToAsset.clear();
-        this._loadQueue.length = 0;
+        this._loadQueue.clear();
         this._currentlyLoading.clear();
         this._retryCount.clear();
+        this._failed.clear();
     }
 
     /**
@@ -129,18 +140,35 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
      * the loading process. Use getResource() later to check if the asset has finished loading.
      *
      * @param {string} url - The URL of the gsplat file to load.
+     * @param {number} [priority] - Load priority, higher loads first. Only affects a load that has
+     * to wait for a free slot. When omitted, a queued load keeps its current priority and a new one
+     * gets 0.
      */
-    load(url) {
+    load(url, priority) {
         Debug.assert(url);
+        Debug.assert(!Number.isNaN(priority), `GSplatAssetLoader: NaN load priority for ${url}`);
+
+        const asset = this._urlToAsset.get(url);
+
+        // A previous attempt resolved successfully but produced no usable resource - most
+        // commonly because the load was canceled (aborted) while still in flight, e.g. LOD
+        // requirements moved on before it finished. This is not a failure: retry unconditionally
+        // whenever something asks for this URL again (callers only poll while they still want
+        // it), unless the URL has genuinely, permanently failed via a real error.
+        if (asset && asset.loaded && !asset.resource && !this._currentlyLoading.has(url) && !this._failed.has(url)) {
+            asset.loaded = false;
+        }
 
         // Skip if already loading or loaded
-        const asset = this._urlToAsset.get(url);
         if (asset?.loaded || this._currentlyLoading.has(url)) {
             return;
         }
 
-        // Skip if already queued
-        if (this._loadQueue.includes(url)) {
+        // Already queued, only its priority can change
+        if (this._loadQueue.has(url)) {
+            if (priority !== undefined) {
+                this._loadQueue.set(url, priority);
+            }
             return;
         }
 
@@ -149,8 +177,19 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
             this._startLoading(url);
         } else {
             // Otherwise, add to queue
-            this._loadQueue.push(url);
+            this._loadQueue.set(url, priority ?? 0);
         }
+    }
+
+    /**
+     * Removes a load that is still waiting in the queue. A load that has already started, or has
+     * finished, is not affected.
+     *
+     * @param {string} url - The URL of the gsplat file.
+     * @returns {boolean} True if the load was queued and has been removed.
+     */
+    dequeue(url) {
+        return this._loadQueue.delete(url);
     }
 
     /**
@@ -239,8 +278,14 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
             asset.loaded = false;
             asset.loading = false;
 
-            // Retry loading
+            // Retry loading. Re-attach only the 'error' listener - it was consumed by the
+            // once() that just fired, and a second consecutive failure would otherwise have
+            // nothing left to catch it. Don't touch 'load': the original listener from
+            // _startLoading() is still pending (it never fired) and re-adding it would leave
+            // two 'load' listeners on this asset, double-invoking _onAssetLoadSuccess on the
+            // eventual success.
             Debug.warn(`GSplatAssetLoader: Retrying load for ${url} (attempt ${retryCount + 1}/${this.maxRetries})`);
+            asset.once('error', retryErr => this._onAssetLoadError(url, asset, retryErr));
             this._registry.load(asset);
         } else {
             // Max retries exceeded
@@ -251,6 +296,9 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
 
             // Clear retry count
             this._retryCount.delete(url);
+
+            // Mark as genuinely, permanently failed
+            this._failed.add(url);
 
             // Process next item in queue
             this._processQueue();
@@ -268,11 +316,21 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
             return;
         }
 
-        while (this._currentlyLoading.size < this.maxConcurrentLoads && this._loadQueue.length > 0) {
-            const url = this._loadQueue.shift();
-            if (url) {
-                this._startLoading(url);
+        while (this._currentlyLoading.size < this.maxConcurrentLoads && this._loadQueue.size > 0) {
+
+            // highest priority first, the first of equal priorities keeps request order. Seeded
+            // from the first entry, so a queued URL is picked whatever the priorities hold.
+            let url = null;
+            let best = 0;
+            for (const [queuedUrl, priority] of this._loadQueue) {
+                if (url === null || priority > best) {
+                    best = priority;
+                    url = queuedUrl;
+                }
             }
+
+            this._loadQueue.delete(url);
+            this._startLoading(url);
         }
     }
 
@@ -287,13 +345,11 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
         this._currentlyLoading.delete(url);
 
         // Remove from queue if present
-        const queueIndex = this._loadQueue.indexOf(url);
-        if (queueIndex !== -1) {
-            this._loadQueue.splice(queueIndex, 1);
-        }
+        this._loadQueue.delete(url);
 
         // Clear retry count
         this._retryCount.delete(url);
+        this._failed.delete(url);
 
         // Unload the asset
         const asset = this._urlToAsset.get(url);
@@ -327,6 +383,17 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
     getResource(url) {
         const asset = this._urlToAsset.get(url);
         return asset?.resource;
+    }
+
+    /**
+     * Checks whether loading a URL has genuinely, permanently failed (a real error, not a
+     * cancellation, with retries exhausted).
+     *
+     * @param {string} url - The URL to check.
+     * @returns {boolean} True if the load has permanently failed.
+     */
+    hasFailed(url) {
+        return this._failed.has(url);
     }
 }
 

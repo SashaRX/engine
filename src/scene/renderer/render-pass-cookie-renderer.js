@@ -46,8 +46,6 @@ class RenderPassCookieRenderer extends RenderPass {
         super(device);
         this._cubeSlotsOffsets = cubeSlotsOffsets;
 
-        this.requiresCubemaps = false;
-
         this.blitTextureId = device.scope.resolve('blitTexture');
         this.invViewProjId = device.scope.resolve('invViewProj');
 
@@ -63,6 +61,8 @@ class RenderPassCookieRenderer extends RenderPass {
 
         this._evtDeviceRestored?.off();
         this._evtDeviceRestored = null;
+
+        super.destroy();
     }
 
     static create(renderTarget, cubeSlotsOffsets) {
@@ -72,8 +72,6 @@ class RenderPassCookieRenderer extends RenderPass {
         // prepare a single render pass to render all quads to the render target
         const renderPass = new RenderPassCookieRenderer(renderTarget.device, cubeSlotsOffsets);
         renderPass.init(renderTarget);
-        renderPass.colorOps.clear = false;
-        renderPass.depthStencilOps.clearDepth = false;
 
         return renderPass;
     }
@@ -107,8 +105,13 @@ class RenderPassCookieRenderer extends RenderPass {
                 continue;
             }
 
-            // only render cookie when the slot is reassigned (assuming the cookie texture is static)
-            if (!light.atlasSlotUpdated && !this._forceCopy) {
+            // re-render the cookie if its texture content changed since it was last copied into the
+            // atlas - this handles dynamic cookies such as video or procedurally generated textures
+            const cookieUpdated = light.cookie && light.cookie.uploadVersion !== light.cookieRenderVersion;
+
+            // only render cookie when the slot is reassigned, the texture content changed, or a
+            // forced copy is requested (e.g. after the device was restored)
+            if (!light.atlasSlotUpdated && !cookieUpdated && !this._forceCopy) {
                 continue;
             }
 
@@ -181,6 +184,9 @@ class RenderPassCookieRenderer extends RenderPass {
 
             // source texture
             this.blitTextureId.setValue(light.cookie);
+
+            // remember the content version we copied, so subsequent changes trigger a re-render
+            light.cookieRenderVersion = light.cookie.uploadVersion;
 
             // render it to a viewport of the target
             for (let face = 0; face < faceCount; face++) {

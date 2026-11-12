@@ -20,6 +20,10 @@ import { PickerId } from '../../../scene/picker-id.js';
  * @import { Texture } from '../../../platform/graphics/texture.js'
  */
 
+// Appended to warnings fired when a legacy (non-unified) API is hit in unified mode.
+// Explains the default flip and the temporary workaround.
+const UNIFIED_LEGACY_HINT = 'GSplatComponent#unified now defaults to true (unified rendering). To temporarily restore the deprecated legacy behavior, explicitly set unified=false when creating the component — note that non-unified mode will be removed in a future release.';
+
 /**
  * The GSplatComponent enables an {@link Entity} to render 3D Gaussian Splats. Splats are always
  * loaded from {@link Asset}s rather than being created programmatically. The asset type is
@@ -30,7 +34,7 @@ import { PickerId } from '../../../scene/picker-id.js';
  * GSplatComponent to an {@link Entity}, use {@link Entity#addComponent}:
  *
  * ```javascript
- * const entity = new pc.Entity();
+ * const entity = new Entity();
  * entity.addComponent('gsplat', {
  *     asset: asset
  * });
@@ -40,40 +44,27 @@ import { PickerId } from '../../../scene/picker-id.js';
  * property:
  *
  * ```javascript
- * entity.gsplat.customAabb = new pc.BoundingBox(new pc.Vec3(), new pc.Vec3(10, 10, 10));
+ * entity.gsplat.customAabb = new BoundingBox(new Vec3(), new Vec3(10, 10, 10));
  *
  * console.log(entity.gsplat.customAabb);
- * ```
- *
- * ## Unified Rendering
- *
- * The {@link unified} property enables unified rendering mode, which provides advanced features
- * for Gaussian Splats:
- *
- * - **Global Sorting**: Multiple splat components are sorted together in a single unified sort,
- *   eliminating visibility artifacts and popping effects when splat components overlap.
- * - **LOD Streaming**: Dynamically loads and renders appropriate levels of detail based on camera
- *   distance, enabling efficient rendering of massive splat scenes.
- *
- * ```javascript
- * // Enable unified rendering for advanced features
- * entity.gsplat.unified = true;
  * ```
  *
  * Relevant Engine API examples:
  *
  * - [Simple Splat Loading](https://playcanvas.github.io/#/gaussian-splatting/simple)
+ * - [Billions of Splats](https://playcanvas.github.io/#/gaussian-splatting/billions)
+ * - [Downtown Streaming](https://playcanvas.github.io/#/gaussian-splatting/downtown)
  * - [Global Sorting](https://playcanvas.github.io/#/gaussian-splatting/global-sorting)
- * - [LOD](https://playcanvas.github.io/#/gaussian-splatting/lod)
- * - [LOD Instances](https://playcanvas.github.io/#/gaussian-splatting/lod-instances)
- * - [LOD Streaming](https://playcanvas.github.io/#/gaussian-splatting/lod-streaming)
- * - [LOD Streaming with Spherical Harmonics](https://playcanvas.github.io/#/gaussian-splatting/lod-streaming-sh)
+ * - [LOD Instances](https://playcanvas.github.io/#/gaussian-splatting/streamed-instances)
  * - [Multi-Splat](https://playcanvas.github.io/#/gaussian-splatting/multi-splat)
  * - [Multi-View](https://playcanvas.github.io/#/gaussian-splatting/multi-view)
  * - [Picking](https://playcanvas.github.io/#/gaussian-splatting/picking)
- * - [Reveal Effect](https://playcanvas.github.io/#/gaussian-splatting/reveal)
- * - [Shader Effects](https://playcanvas.github.io/#/gaussian-splatting/shader-effects)
- * - [Spherical Harmonics](https://playcanvas.github.io/#/gaussian-splatting/spherical-harmonics)
+ * - [Reveal Effect](https://playcanvas.github.io/#/gaussian-splatting-fx/reveal)
+ * - [Shader Effects](https://playcanvas.github.io/#/gaussian-splatting-fx/shader-effects)
+ * - [Spherical Harmonics](https://playcanvas.github.io/#/gaussian-splatting/simple-sh)
+ * - [Streamed LCC2](https://playcanvas.github.io/#/gaussian-splatting/streamed-lcc2)
+ * - [Streamed SOG](https://playcanvas.github.io/#/gaussian-splatting/streamed-sog)
+ * - [Streamed SOG with Spherical Harmonics](https://playcanvas.github.io/#/gaussian-splatting/streamed-sog-sh)
  *
  * @hideconstructor
  * @category Graphics
@@ -108,22 +99,33 @@ class GSplatComponent extends Component {
      */
     _materialTmp = null;
 
-    /** @private */
-    _highQualitySH = true;
-
     /**
-     * Base distance for the first LOD transition (LOD 0 to LOD 1).
+     * Base distance for the first LOD transition.
      *
      * @private
      */
     _lodBaseDistance = 5;
 
     /**
-     * Geometric multiplier between successive LOD distance thresholds.
+     * Geometric multiplier between successive LOD transition distances.
      *
      * @private
      */
     _lodMultiplier = 3;
+
+    /**
+     * Minimum allowed LOD index (inclusive).
+     *
+     * @private
+     */
+    _lodRangeMin = 0;
+
+    /**
+     * Maximum allowed LOD index (inclusive).
+     *
+     * @private
+     */
+    _lodRangeMax = 99;
 
     /**
      * @type {BoundingBox|null}
@@ -167,11 +169,11 @@ class GSplatComponent extends Component {
     _castShadows = false;
 
     /**
-     * Whether to use the unified gsplat rendering.
+     * Whether to use the unified gsplat rendering. Defaults to true.
      *
      * @private
      */
-    _unified = false;
+    _unified = true;
 
     /**
      * Per-instance shader parameters. Stores objects with scopeId and data.
@@ -263,7 +265,7 @@ class GSplatComponent extends Component {
     set instance(value) {
 
         if (this.unified) {
-            Debug.errorOnce('GSplatComponent#instance setter is not supported when unified is true.');
+            Debug.errorOnce(`GSplatComponent#instance setter is only available in legacy non-unified mode. ${UNIFIED_LEGACY_HINT}`);
             return;
         }
 
@@ -279,7 +281,7 @@ class GSplatComponent extends Component {
             if (!mi.node) {
                 mi.node = this.entity;
             }
-            mi.castShadow = this._castShadows;
+            mi.castShadows = this._castShadows;
             mi.setCustomAabb(this._customAabb);
 
             if (this.enabled && this.entity.enabled) {
@@ -295,21 +297,15 @@ class GSplatComponent extends Component {
      * @ignore
      */
     get instance() {
+        if (this.unified) {
+            Debug.warnOnce(`GSplatComponent#instance getter returns null in unified mode. ${UNIFIED_LEGACY_HINT}`);
+        }
         return this._instance;
     }
 
-    /**
-     * Sets the material used to render the gsplat.
-     *
-     * **Note:** This setter is only supported when {@link unified} is `false`. When it's true, multiple
-     * gsplat components share a single material per camera/layer combination. To access materials in
-     * unified mode, use {@link GSplatComponentSystem#getMaterial}.
-     *
-     * @param {ShaderMaterial} value - The material instance.
-     */
     set material(value) {
         if (this.unified) {
-            Debug.warn('GSplatComponent#material setter is not supported when unified true. Use app.systems.gsplat.getMaterial(camera, layer) to access materials.');
+            Debug.warn(`GSplatComponent#material setter is only available in legacy non-unified mode; in unified mode use app.systems.gsplat.getMaterial(camera, layer). ${UNIFIED_LEGACY_HINT}`);
             return;
         }
         if (this._instance) {
@@ -319,50 +315,12 @@ class GSplatComponent extends Component {
         }
     }
 
-    /**
-     * Gets the material used to render the gsplat.
-     *
-     * **Note:** This getter returns `null` when {@link unified} is `true`. In unified mode, materials are
-     * organized per camera/layer combination rather than per component. To access materials in
-     * unified mode, use {@link GSplatComponentSystem#getMaterial}.
-     *
-     * @type {ShaderMaterial|null}
-     */
     get material() {
         if (this.unified) {
-            Debug.warnOnce('GSplatComponent#material getter returns null when unified=true. Use app.systems.gsplat.getMaterial(camera, layer) instead.');
+            Debug.warnOnce(`GSplatComponent#material getter returns null in unified mode; use app.systems.gsplat.getMaterial(camera, layer) instead. ${UNIFIED_LEGACY_HINT}`);
             return null;
         }
         return this._instance?.material ?? this._materialTmp ?? null;
-    }
-
-    /**
-     * Sets whether to use the high quality or the approximate (but fast) spherical-harmonic calculation when rendering SOG data.
-     *
-     * The low quality approximation evaluates the scene's spherical harmonic contributions
-     * along the camera's Z-axis instead of using each gaussian's view vector. This results
-     * in gaussians being accurate at the center of the screen and becoming less accurate
-     * as they appear further from the center. This is a good trade-off for performance
-     * when rendering large SOG datasets, especially on mobile devices.
-     *
-     * Defaults to false.
-     *
-     * @type {boolean}
-     */
-    set highQualitySH(value) {
-        if (value !== this._highQualitySH) {
-            this._highQualitySH = value;
-            this._instance?.setHighQualitySH(value);
-        }
-    }
-
-    /**
-     * Gets whether the high quality (true) or the fast approximate (false) spherical-harmonic calculation is used when rendering SOG data.
-     *
-     * @type {boolean}
-     */
-    get highQualitySH() {
-        return this._highQualitySH;
     }
 
     /**
@@ -395,7 +353,7 @@ class GSplatComponent extends Component {
             }
 
             // Handle non-unified mode mesh instance
-            const mi = this.instance?.meshInstance;
+            const mi = this._instance?.meshInstance;
 
             if (mi) {
                 if (this._castShadows && !value) {
@@ -405,7 +363,7 @@ class GSplatComponent extends Component {
                     }
                 }
 
-                mi.castShadow = value;
+                mi.castShadows = value;
 
                 if (!this._castShadows && value) {
                     for (let i = 0; i < layers.length; i++) {
@@ -429,10 +387,34 @@ class GSplatComponent extends Component {
     }
 
     /**
-     * Sets the base distance for the first LOD transition (LOD 0 to LOD 1). Objects closer
-     * than this distance use the highest quality LOD. Each subsequent LOD level transitions
-     * at a progressively larger distance, controlled by {@link lodMultiplier}. Clamped to a
-     * minimum of 0.1. Defaults to 5.
+     * @type {number}
+     * @deprecated Use {@link GSplatComponent#lodBaseDistance} and
+     * {@link GSplatComponent#lodMultiplier} instead.
+     * @ignore
+     */
+    set lodFalloff(value) {
+        Debug.removed('GSplatComponent#lodFalloff is removed. Use GSplatComponent#lodBaseDistance and GSplatComponent#lodMultiplier to control how detail falls off with distance.');
+    }
+
+    /**
+     * @type {number}
+     * @deprecated Use {@link GSplatComponent#lodBaseDistance} and
+     * {@link GSplatComponent#lodMultiplier} instead.
+     * @ignore
+     */
+    get lodFalloff() {
+        Debug.removed('GSplatComponent#lodFalloff is removed. Use GSplatComponent#lodBaseDistance and GSplatComponent#lodMultiplier to control how detail falls off with distance.');
+        return 1;
+    }
+
+    /**
+     * Sets the base distance for the first LOD transition (LOD 0 to LOD 1). Objects closer than
+     * this distance use the highest quality LOD. Each subsequent LOD level transitions at a
+     * progressively larger distance, controlled by {@link GSplatComponent#lodMultiplier}. In world
+     * units, and compensated for the camera's field of view. How these distances combine with the
+     * scene's splat budget is set by {@link GSplatParams#splatBudgetMode}: in target mode they only
+     * shape the falloff and how detail divides between splats, in limit mode they decide the
+     * detail. Clamped to a minimum of 0.1. Defaults to 5.
      *
      * @type {number}
      */
@@ -453,13 +435,12 @@ class GSplatComponent extends Component {
     }
 
     /**
-     * Sets the multiplier between successive LOD distance thresholds. Each LOD level
-     * transitions at this factor times the previous level's distance, creating a geometric
-     * progression. Lower values keep higher quality at distance; higher values switch to
-     * coarser LODs sooner. Clamped to a minimum of 1.2 to avoid degenerate logarithmic LOD
-     * computation. LOD distances are automatically compensated for the camera's field of
-     * view — a wider FOV makes objects appear smaller on screen, so LOD switches to coarser
-     * levels sooner to match the reduced screen-space detail. Defaults to 3.
+     * Sets the multiplier between successive LOD distance thresholds. Each LOD level transitions
+     * at this factor times the previous level's distance, creating a geometric progression. Higher
+     * values keep finer detail further from the camera, at a higher memory cost; lower values
+     * switch to coarser levels sooner. LOD distances are compensated for the camera's field of
+     * view - a wider FOV makes objects appear smaller on screen, so LOD switches to coarser levels
+     * sooner. Clamped to a minimum of 1.2. Defaults to 3.
      *
      * @type {number}
      */
@@ -480,25 +461,69 @@ class GSplatComponent extends Component {
     }
 
     /**
-     * @type {number[]|null}
-     * @deprecated Use {@link lodBaseDistance} and {@link lodMultiplier} instead.
-     * @ignore
+     * Sets the minimum allowed LOD index (inclusive) for this splat. The optimal LOD selected by
+     * distance is clamped so it never goes finer (lower index) than this value. The value is
+     * further clamped to the asset's valid LOD range `[0, octree.lodLevels - 1]` at use. Setting a
+     * higher minimum prevents downloading the highest quality (largest) LOD files. Defaults to 0.
+     *
+     * @type {number}
      */
-    set lodDistances(value) {
-        Debug.removed('GSplatComponent#lodDistances is removed. Use lodBaseDistance and lodMultiplier instead.');
-        if (Array.isArray(value) && value.length > 0) {
-            this.lodBaseDistance = value[0];
-            this.lodMultiplier = 3;
+    set lodRangeMin(value) {
+        this._lodRangeMin = value;
+        if (this._placement) {
+            this._placement.lodRangeMin = value;
         }
     }
 
     /**
+     * Gets the minimum allowed LOD index.
+     *
+     * @type {number}
+     */
+    get lodRangeMin() {
+        return this._lodRangeMin;
+    }
+
+    /**
+     * Sets the maximum allowed LOD index (inclusive) for this splat. The optimal LOD selected by
+     * distance is clamped so it never goes coarser (higher index) than this value. The value is
+     * clamped to the asset's valid LOD range `[0, octree.lodLevels - 1]` at use, so the default of
+     * 99 effectively means "no cap". Defaults to 99.
+     *
+     * @type {number}
+     */
+    set lodRangeMax(value) {
+        this._lodRangeMax = value;
+        if (this._placement) {
+            this._placement.lodRangeMax = value;
+        }
+    }
+
+    /**
+     * Gets the maximum allowed LOD index.
+     *
+     * @type {number}
+     */
+    get lodRangeMax() {
+        return this._lodRangeMax;
+    }
+
+    /**
+     * @type {number[]|null}
+     * @deprecated Use {@link GSplatComponent#lodBaseDistance} and {@link GSplatComponent#lodMultiplier} instead.
+     * @ignore
+     */
+    set lodDistances(value) {
+        Debug.removed('GSplatComponent#lodDistances is removed. Use GSplatComponent#lodBaseDistance and GSplatComponent#lodMultiplier to set the LOD transition distances.');
+    }
+
+    /**
      * @type {number[]}
-     * @deprecated Use {@link lodBaseDistance} and {@link lodMultiplier} instead.
+     * @deprecated Use {@link GSplatComponent#lodBaseDistance} and {@link GSplatComponent#lodMultiplier} instead.
      * @ignore
      */
     get lodDistances() {
-        Debug.removed('GSplatComponent#lodDistances is removed. Use lodBaseDistance and lodMultiplier instead.');
+        Debug.removed('GSplatComponent#lodDistances is removed. Use GSplatComponent#lodBaseDistance and GSplatComponent#lodMultiplier to set the LOD transition distances.');
         return [];
     }
 
@@ -522,15 +547,16 @@ class GSplatComponent extends Component {
     }
 
     /**
-     * Sets whether to use the unified gsplat rendering. Default is false.
-     *
-     * Note: Material handling differs between modes. When unified is false, use {@link material}.
-     * When unified is true, materials are shared per camera/layer - use
-     * {@link GSplatComponentSystem#getMaterial} instead.
+     * Sets whether to use the unified gsplat rendering.
      *
      * @type {boolean}
+     * @deprecated Non-unified gsplat rendering is being removed; unified rendering will be the only supported mode.
+     * @ignore
      */
     set unified(value) {
+        if (value === false) {
+            Debug.deprecated('GSplatComponent#unified is deprecated. Non-unified gsplat rendering will be removed in a future release; please migrate to unified rendering (the new default).');
+        }
         if (this._unified !== value) {
             this._unified = value;
             this._onGSplatAssetAdded();
@@ -541,7 +567,8 @@ class GSplatComponent extends Component {
      * Gets whether to use the unified gsplat rendering.
      *
      * @type {boolean}
-     * @alpha
+     * @deprecated Non-unified gsplat rendering is being removed; unified rendering will be the only supported mode.
+     * @ignore
      */
     get unified() {
         return this._unified;
@@ -559,10 +586,10 @@ class GSplatComponent extends Component {
     }
 
     /**
-     * Sets the work buffer update mode. Only applicable in unified rendering mode.
+     * Sets the work buffer update mode.
      *
-     * In unified mode, splat data is rendered to a work buffer only when needed (e.g., when
-     * transforms change). Can be:
+     * Splat data is rendered to a work buffer only when needed (e.g., when transforms change).
+     * Can be:
      * - {@link WORKBUFFER_UPDATE_AUTO}: Update only when needed (default).
      * - {@link WORKBUFFER_UPDATE_ONCE}: Force update this frame, then switch to AUTO.
      * - {@link WORKBUFFER_UPDATE_ALWAYS}: Update every frame.
@@ -572,8 +599,8 @@ class GSplatComponent extends Component {
      *
      * Note: {@link WORKBUFFER_UPDATE_ALWAYS} has a performance impact as it re-renders
      * all splat data to the work buffer every frame. Where possible, consider using shader
-     * customization on the unified gsplat material (`app.scene.gsplat.material`) which is
-     * applied during final rendering without re-rendering the work buffer.
+     * customization on the gsplat material (`app.scene.gsplat.material`) which is applied
+     * during final rendering without re-rendering the work buffer.
      *
      * @type {number}
      */
@@ -594,8 +621,7 @@ class GSplatComponent extends Component {
     }
 
     /**
-     * Sets custom shader code for modifying splats when written to the work buffer. Only
-     * applicable in unified rendering mode.
+     * Sets custom shader code for modifying splats when written to the work buffer.
      *
      * Must provide all three functions:
      * - `modifySplatCenter`: Modify the splat center position
@@ -767,7 +793,7 @@ class GSplatComponent extends Component {
             return;
         }
 
-        const meshInstance = this.instance?.meshInstance;
+        const meshInstance = this._instance?.meshInstance;
         if (meshInstance) {
             const layers = this.system.app.scene.layers;
             for (let i = 0; i < this._layers.length; i++) {
@@ -790,7 +816,7 @@ class GSplatComponent extends Component {
             return;
         }
 
-        const meshInstance = this.instance?.meshInstance;
+        const meshInstance = this._instance?.meshInstance;
         if (meshInstance) {
             const layers = this.system.app.scene.layers;
             for (let i = 0; i < this._layers.length; i++) {
@@ -813,31 +839,38 @@ class GSplatComponent extends Component {
         }
     }
 
-    onRemove() {
+    onBeforeRemove() {
+        // removing a component does not disable it first, so undo what onEnable set up
+        if (this.enabled && this.entity.enabled) {
+            this.onDisable();
+        }
+
         this.destroyInstance();
 
         this.asset = null;
         this._assetReference.id = null;
 
         this.entity.off('remove', this.onRemoveChild, this);
+        this.entity.off('removehierarchy', this.onRemoveChild, this);
         this.entity.off('insert', this.onInsertChild, this);
+        this.entity.off('inserthierarchy', this.onInsertChild, this);
     }
 
     onLayersChanged(oldComp, newComp) {
         this.addToLayers();
-        oldComp.off('add', this.onLayerAdded, this);
-        oldComp.off('remove', this.onLayerRemoved, this);
-        newComp.on('add', this.onLayerAdded, this);
-        newComp.on('remove', this.onLayerRemoved, this);
+
+        // store the new handles, so that onDisable can unsubscribe from the current composition
+        this._evtLayerAdded?.off();
+        this._evtLayerAdded = newComp.on('add', this.onLayerAdded, this);
+        this._evtLayerRemoved?.off();
+        this._evtLayerRemoved = newComp.on('remove', this.onLayerRemoved, this);
     }
 
     onLayerAdded(layer) {
         const index = this.layers.indexOf(layer.id);
         if (index < 0) return;
-        if (this.unified) {
-            Debug.errorOnce('GSplatComponent#onLayerAdded is not supported when unified is true.');
-            return;
-        }
+        // unified mode manages layer membership via GSplatPlacement; no legacy mesh-instance work
+        if (this.unified) return;
 
         if (this._instance) {
             layer.addMeshInstances(this._instance.meshInstance);
@@ -847,10 +880,8 @@ class GSplatComponent extends Component {
     onLayerRemoved(layer) {
         const index = this.layers.indexOf(layer.id);
         if (index < 0) return;
-        if (this.unified) {
-            Debug.errorOnce('GSplatComponent#onLayerRemoved is not supported when unified is true.');
-            return;
-        }
+        // unified mode manages layer membership via GSplatPlacement; no legacy mesh-instance work
+        if (this.unified) return;
 
         if (this._instance) {
             layer.removeMeshInstances(this._instance.meshInstance);
@@ -914,7 +945,7 @@ class GSplatComponent extends Component {
 
     /**
      * Sets a shader parameter for this gsplat instance. Parameters set here are applied
-     * during unified rendering.
+     * during rendering.
      *
      * @param {string} name - The name of the parameter (uniform name in shader).
      * @param {number|number[]|ArrayBufferView|Texture|StorageBuffer} data - The value for the parameter.
@@ -922,7 +953,7 @@ class GSplatComponent extends Component {
     setParameter(name, data) {
         const scopeId = this.system.app.graphicsDevice.scope.resolve(name);
         this._parameters.set(name, { scopeId, data });
-        if (this._placement) this._placement.renderDirty = true;
+        if (this._placement) this._placement.markDirty();
     }
 
     /**
@@ -942,19 +973,19 @@ class GSplatComponent extends Component {
      */
     deleteParameter(name) {
         this._parameters.delete(name);
-        if (this._placement) this._placement.renderDirty = true;
+        if (this._placement) this._placement.markDirty();
     }
 
     /**
      * Gets an instance texture by name. Instance textures are per-component textures defined
-     * in the resource's format with `storage: GSPLAT_STREAM_INSTANCE`. Only available in unified mode.
+     * in the resource's format with `storage: GSPLAT_STREAM_INSTANCE`.
      *
      * @param {string} name - The name of the texture.
-     * @returns {Texture|null} The texture, or null if not found or not in unified mode.
+     * @returns {Texture|null} The texture, or null if not found.
      * @example
      * // Add an instance stream to the resource format
      * resource.format.addExtraStreams([
-     *     { name: 'instanceTint', format: pc.PIXELFORMAT_RGBA8, storage: pc.GSPLAT_STREAM_INSTANCE }
+     *     { name: 'instanceTint', format: PIXELFORMAT_RGBA8, storage: GSPLAT_STREAM_INSTANCE }
      * ]);
      *
      * // Get the instance texture and fill it with data
@@ -1000,6 +1031,8 @@ class GSplatComponent extends Component {
             this._placement = new GSplatPlacement(resource, this.entity, 0, this._parameters, null, this._id);
             this._placement.lodBaseDistance = this._lodBaseDistance;
             this._placement.lodMultiplier = this._lodMultiplier;
+            this._placement.lodRangeMin = this._lodRangeMin;
+            this._placement.lodRangeMax = this._lodRangeMax;
             this._placement.workBufferUpdate = this._workBufferUpdate;
             this._placement.workBufferModifier = this._workBufferModifier;
 
@@ -1013,7 +1046,6 @@ class GSplatComponent extends Component {
             // create new instance
             this.instance = new GSplatInstance(resource, {
                 material: this._materialTmp,
-                highQualitySH: this._highQualitySH,
                 scene: this.system.app.scene
             });
             this._materialTmp = null;

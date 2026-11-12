@@ -10,7 +10,24 @@ import { ANIM_LAYER_OVERWRITE } from '../../anim/controller/constants.js';
  */
 
 /**
- * The Anim Component Layer allows managers a single layer of the animation state graph.
+ * An AnimComponentLayer is one layer of an {@link AnimComponent}. It runs the state machine that
+ * the {@link AnimStateGraph} defines for that layer and contributes the result to the entity's
+ * final pose with a {@link weight}, either overwriting the layers beneath it or adding to them
+ * according to `blendType`. A {@link mask} limits which nodes of the hierarchy the layer
+ * animates, which is how an upper-body action plays on top of a full-body locomotion layer. The
+ * first layer is {@link AnimComponent#baseLayer}; add more with {@link AnimComponent#addLayer}.
+ *
+ * Playback is per layer: {@link play} starts a named state, {@link transition} blends to another
+ * state over a given time, {@link pause} and {@link reset} act on the current state, and
+ * {@link activeState}, {@link activeStateProgress} and {@link transitioning} report where the
+ * layer is. {@link assignAnimation} binds an {@link AnimTrack} to a state, or to a node inside a
+ * blend tree using a dotted path, and {@link blendToWeight} fades the whole layer in or out.
+ *
+ * @example
+ * // Fade in an upper-body layer and play its 'Wave' state over the base layer
+ * const layer = entity.anim.findLayer('UpperBody');
+ * layer.blendToWeight(1, 0.3);
+ * layer.play('Wave');
  *
  * @category Animation
  */
@@ -304,7 +321,12 @@ class AnimComponentLayer {
         this._controller.rebind();
     }
 
-    update(dt) {
+    /**
+     * @param {number} dt - The time elapsed since the last update, in seconds.
+     * @param {boolean} [evaluatePose] - Whether the pose should be evaluated and applied.
+     * @ignore
+     */
+    update(dt, evaluatePose = true) {
         if (this._blendTime) {
             if (this._blendTimeElapsed < this._blendTime) {
                 this.weight = math.lerp(this._startingWeight, this._targetWeight, this._blendTimeElapsed / this._blendTime);
@@ -317,7 +339,7 @@ class AnimComponentLayer {
                 this._targetWeight = 0;
             }
         }
-        this._controller.update(dt);
+        this._controller.update(dt, evaluatePose);
     }
 
 

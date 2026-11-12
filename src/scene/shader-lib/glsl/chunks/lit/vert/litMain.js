@@ -35,6 +35,8 @@ mat4 dModelMatrix;
     #include "uv1VS"
 #endif
 
+// expand attributes for additional uv sets (UV2 and up)
+#include "uvSetAttributeVS, UV_SET_COUNT"
 
 #ifdef LINEAR_DEPTH
     #ifndef VIEWMATRIX
@@ -64,8 +66,9 @@ mat4 dModelMatrix;
 #include  "litUserCodeVS"
 
 #ifdef VERTEX_COLOR
+    // the exact sRGB transfer, as decodePS decodes colors in the fragment shader
     vec3 decodeGamma(vec3 raw) {
-        return pow(raw, vec3(2.2));
+        return mix(pow(raw * 0.9478672986 + 0.0521327014, vec3(2.4)), raw * 0.0773993808, lessThanEqual(raw, vec3(0.04045)));
     }
     vec4 gammaCorrectInput(vec4 color) {
         return vec4(decodeGamma(color.xyz), color.w);
@@ -107,6 +110,10 @@ void main(void) {
         #endif
     #endif
 
+    // expand code for additional uv sets (UV2 and up)
+    #include "uvSetVS, UV_SET_COUNT"
+    #include "uvSetVaryingVS, UV_VARYING_SET_COUNT"
+
     // expand code for uv transforms
     #include "uvTransformVS, UV_TRANSFORMS_COUNT"
 
@@ -121,6 +128,16 @@ void main(void) {
     #ifdef LINEAR_DEPTH
         // linear depth from the worldPosition, see getLinearDepth
         vLinearDepth = -(matrix_view * vec4(vPositionW, 1.0)).z;
+    #endif
+
+    #ifdef LIT_DYNAMIC_REFRACTION
+        // the scale of the model matrix, which scales the thickness of the refraction
+        vModelScale = vec3(length(dModelMatrix[0].xyz), length(dModelMatrix[1].xyz), length(dModelMatrix[2].xyz));
+    #endif
+
+    #ifdef LIT_DITHER_ID
+        // per-mesh offset of the dither pattern, hashed from the position of the model matrix
+        vDitherId = 64.0 * fract(sin(dot(dModelMatrix[3].xyz, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
     #endif
 
     #ifdef MSDF

@@ -10,7 +10,15 @@ export default /* glsl */`
     #include "linearizeDepthPS"
 #endif
 
+#if SHADOW_TYPE == VSM_16F || SHADOW_TYPE == VSM_32F
+    #include "shadowEVSMExponentPS"
+#endif
+
 void main(void) {
+
+    #ifdef CLIP_PLANES
+        applyClipPlanes(vPositionW);
+    #endif
 
     #include "litUserMainStartPS"
 
@@ -34,10 +42,19 @@ void main(void) {
     #endif
 
     #if SHADOW_TYPE == VSM_16F || SHADOW_TYPE == VSM_32F
+
+        // Rasterization of degenerate triangles, which animated meshes can generate, can supply
+        // depth outside of the [0, 1] range or even NaN. The exponential warp below turns those
+        // into huge values, which the VSM blur then spreads over a large area, generating visible
+        // artifacts. Note that the depth range is not clipped for other shadow types, as they
+        // either store the depth using the depth buffer, which clamps it, or the error is limited
+        // to the individual texels and so is not noticeable.
+        if (!(depth >= 0.0 && depth <= 1.0)) discard;
+
         #if SHADOW_TYPE == VSM_32F
-            float exponent = 15.0;
+            float exponent = VSM_EXPONENT_32F;
         #else
-            float exponent = 5.54;
+            float exponent = VSM_EXPONENT_16F;
         #endif
         depth = 2.0 * depth - 1.0;
         depth =  exp(exponent * depth);

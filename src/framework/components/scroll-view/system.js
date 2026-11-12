@@ -1,30 +1,49 @@
-import { Vec2 } from '../../../core/math/vec2.js';
 import { ComponentSystem } from '../system.js';
 import { ScrollViewComponent } from './component.js';
-import { ScrollViewComponentData } from './data.js';
 
 /**
  * @import { AppBase } from '../../app-base.js'
+ * @import { Entity } from '../../entity.js'
+ * @import { Vec2 } from '../../../core/math/vec2.js'
  */
 
-const _schema = [
-    { name: 'enabled', type: 'boolean' },
-    { name: 'horizontal', type: 'boolean' },
-    { name: 'vertical', type: 'boolean' },
-    { name: 'scrollMode', type: 'number' },
-    { name: 'bounceAmount', type: 'number' },
-    { name: 'friction', type: 'number' },
-    { name: 'dragThreshold', type: 'number' },
-    { name: 'useMouseWheel', type: 'boolean' },
-    { name: 'mouseWheelSensitivity', type: 'vec2' },
-    { name: 'horizontalScrollbarVisibility', type: 'number' },
-    { name: 'verticalScrollbarVisibility', type: 'number' }
+/**
+ * Options of the `scrollview` component accepted by {@link ScrollViewComponentSystem} that differ
+ * from the properties of {@link ScrollViewComponent}. Each replaces the same-named property of the
+ * options that {@link Entity#addComponent} derives from the component class; see
+ * {@link ComponentOptionsOverrides}.
+ *
+ * @typedef {object} ScrollViewComponentOptionsOverrides
+ * @property {Vec2 | number[]} [mouseWheelSensitivity] - Same as
+ * {@link ScrollViewComponent#mouseWheelSensitivity}, also accepting an `[x, y]` array.
+ * @ignore
+ */
+
+// Order matters: scalars/booleans/visibility flags must precede the four entity refs.
+// Assigning a scrollbar entity triggers _onHorizontalScrollbarGain / _onVerticalScrollbarGain,
+// which call _syncScrollbarEnabledState — that reads `horizontal`/`vertical` and the visibility
+// fields. If those are still undefined/0 at that moment, the wrong branch fires.
+const _properties = [
+    'horizontal',
+    'vertical',
+    'scrollMode',
+    'bounceAmount',
+    'friction',
+    'dragThreshold',
+    'useMouseWheel',
+    'mouseWheelSensitivity',
+    'horizontalScrollbarVisibility',
+    'verticalScrollbarVisibility',
+    'viewportEntity',
+    'contentEntity',
+    'horizontalScrollbarEntity',
+    'verticalScrollbarEntity'
 ];
 
-const DEFAULT_DRAG_THRESHOLD = 10;
-
 /**
- * Manages creation of {@link ScrollViewComponent}s.
+ * Manages the {@link ScrollViewComponent}s of an application. Reach it through
+ * `app.systems.scrollview`; components are created with {@link Entity#addComponent}, never by
+ * calling the system directly.
  *
  * @category User Interface
  */
@@ -41,32 +60,41 @@ class ScrollViewComponentSystem extends ComponentSystem {
         this.id = 'scrollview';
 
         this.ComponentType = ScrollViewComponent;
-        this.DataType = ScrollViewComponentData;
 
-        this.schema = _schema;
-
-        this.on('beforeremove', this._onRemoveComponent, this);
+        this.on('beforeremove', this.onBeforeRemove, this);
 
         this.app.systems.on('update', this.onUpdate, this);
     }
 
     initializeComponentData(component, data, properties) {
-        if (data.dragThreshold === undefined) {
-            data.dragThreshold = DEFAULT_DRAG_THRESHOLD;
-        }
-        if (data.useMouseWheel === undefined) {
-            data.useMouseWheel = true;
-        }
-        if (data.mouseWheelSensitivity === undefined) {
-            data.mouseWheelSensitivity = new Vec2(1, 1);
+        for (let i = 0; i < _properties.length; i++) {
+            const property = _properties[i];
+            // Skip explicit `undefined` so the component's class-field defaults survive.
+            // The old initializer normalized dragThreshold / useMouseWheel /
+            // mouseWheelSensitivity when they were `=== undefined`; a `hasOwnProperty`
+            // guard alone would clobber those defaults with `undefined` if a caller
+            // shipped `{ dragThreshold: undefined }`.
+            if (data[property] !== undefined) {
+                component[property] = data[property];
+            }
         }
 
-        super.initializeComponentData(component, data, _schema);
+        super.initializeComponentData(component, data);
+    }
 
-        component.viewportEntity = data.viewportEntity;
-        component.contentEntity = data.contentEntity;
-        component.horizontalScrollbarEntity = data.horizontalScrollbarEntity;
-        component.verticalScrollbarEntity = data.verticalScrollbarEntity;
+    cloneComponent(entity, clone) {
+        const c = entity.scrollview;
+
+        const data = {
+            enabled: c.enabled
+        };
+
+        for (let i = 0; i < _properties.length; i++) {
+            const property = _properties[i];
+            data[property] = c[property];
+        }
+
+        return this.addComponent(clone, data);
     }
 
     onUpdate(dt) {
@@ -82,8 +110,8 @@ class ScrollViewComponentSystem extends ComponentSystem {
         }
     }
 
-    _onRemoveComponent(entity, component) {
-        component.onRemove();
+    onBeforeRemove(entity, component) {
+        component.onBeforeRemove();
     }
 
     destroy() {

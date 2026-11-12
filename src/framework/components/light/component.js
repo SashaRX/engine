@@ -6,6 +6,7 @@ import { Asset } from '../../asset/asset.js';
 import { Component } from '../component.js';
 
 /**
+ * @import { BoundingBox } from '../../../core/shape/bounding-box.js'
  * @import { Color } from '../../../core/math/color.js'
  * @import { EventHandle } from '../../../core/event-handle.js'
  * @import { LightComponentSystem } from './system.js'
@@ -23,6 +24,7 @@ const _properties = [
     'affectSpecularity',
     'castShadows',
     'shadowDistance',
+    'shadowBounds',
     'shadowIntensity',
     'shadowResolution',
     'shadowBias',
@@ -59,7 +61,8 @@ const _properties = [
     'penumbraSize',
     'penumbraFalloff',
     'shadowSamples',
-    'shadowBlockerSamples'
+    'shadowBlockerSamples',
+    'volumetricScattering'
 ];
 
 /**
@@ -73,14 +76,40 @@ const _properties = [
  * - `spot`: A local light that emits light similarly to an omni light but is bounded by a cone
  * centered on the owner entity's negative y-axis. Emulates flashlights, spotlights, etc.
  *
+ * Directional and spot lights are therefore aimed with the owner entity's rotation, and shine along
+ * its negative y-axis - so an unrotated light shines straight down. Note that
+ * {@link GraphNode#lookAt} orients an entity's negative z-axis, which aims a camera but not a
+ * light:
+ *
+ * ```javascript
+ * // an unrotated light shines straight down
+ * light.setEulerAngles(0, 0, 0);
+ *
+ * // tilted 45 degrees, it shines down and towards negative z
+ * light.setEulerAngles(45, 0, 0);
+ *
+ * // to aim it at a target, lookAt orients the negative z-axis and the extra rotation brings the
+ * // negative y-axis onto it
+ * light.lookAt(target.getPosition());
+ * light.rotateLocal(90, 0, 0);
+ *
+ * // to aim it along a world space direction, rotate the negative y-axis onto that direction.
+ * // Unlike lookAt, this is well defined even when the direction is straight up or down
+ * const dir = new Vec3(-0.5, -1, -0.3).normalize();
+ * light.setRotation(new Quat().setFromDirections(Vec3.DOWN, dir));
+ *
+ * // the direction a light currently shines in is the negative of its world space up vector
+ * const currentDir = light.up.clone().mulScalar(-1);
+ * ```
+ *
  * You should never need to use the LightComponent constructor directly. To add a LightComponent
  * to an {@link Entity}, use {@link Entity#addComponent}:
  *
  * ```javascript
- * const entity = new pc.Entity();
+ * const entity = new Entity();
  * entity.addComponent('light', {
  *     type: 'omni',
- *     color: new pc.Color(1, 0, 0),
+ *     color: new Color(1, 0, 0),
  *     intensity: 2
  * });
  * ```
@@ -212,7 +241,7 @@ class LightComponent extends Component {
 
     /**
      * Preserves the user-facing type string. Required because `'point'` and `'omni'` both map to
-     * the same underlying int on the {@link Light}, so reverse-mapping would normalise the user's
+     * the same underlying int on the {@link Light}, so reverse-mapping would normalize the user's
      * input.
      *
      * @type {string}
@@ -256,7 +285,7 @@ class LightComponent extends Component {
      * - `"spot"`: A local light that emits light similarly to an omni light but is bounded by a
      * cone centered on the owner entity's negative y-axis.
      *
-     * Defaults to `"directional"`.
+     * Defaults to `"directional"`. See {@link LightComponent} for how a light is aimed.
      *
      * @type {string}
      */
@@ -293,9 +322,9 @@ class LightComponent extends Component {
     }
 
     /**
-     * Gets the color of the light.
+     * Gets the color of the light. Use the setter to update the color.
      *
-     * @type {Color}
+     * @type {Readonly<Color>}
      */
     get color() {
         return this._light.getColor();
@@ -388,6 +417,10 @@ class LightComponent extends Component {
     /**
      * Sets whether the light will cast shadows. Defaults to false.
      *
+     * For a directional light, shadows are only rendered out to
+     * {@link LightComponent#shadowDistance} from the viewpoint, which defaults to 40. Size that to
+     * the area the camera actually sees, or shadows simply stop appearing beyond it.
+     *
      * @type {boolean}
      */
     set castShadows(value) {
@@ -406,7 +439,7 @@ class LightComponent extends Component {
 
     /**
      * Sets the distance from the viewpoint beyond which shadows are no longer rendered. Affects
-     * directional lights only. Defaults to 40.
+     * directional lights only, unless they use {@link shadowBounds}. Defaults to 40.
      *
      * @type {number}
      */
@@ -421,6 +454,51 @@ class LightComponent extends Component {
      */
     get shadowDistance() {
         return this._light.shadowDistance;
+    }
+
+    /**
+     * Sets the world space bounds enclosing the shadow casters of a directional light. By default
+     * (null), the shadow is rendered in cascades fitted to each camera, which spread the shadow
+     * map over the shadow distance in front of the camera. When the bounds are set, the light
+     * renders a single shadow map fitted to the bounds as seen from the light instead, used by all
+     * cameras. This concentrates the resolution of the shadow map where the shadows are needed,
+     * for example on a small part of a large scene, or on a moving object, by updating the bounds
+     * every frame.
+     *
+     * The shadows are rendered regardless of the distance from the camera, and the shadow map is
+     * rendered once for all cameras, instead of once per camera. A shadow falls along the light
+     * from its caster, so the bounds only need to enclose the casters, not the receivers: the
+     * receivers further along the light than the bounds, such as the ground below an object, are
+     * shadowed by the casters within the bounds. Casters outside of the bounds, between the light
+     * and the bounds, cast shadows too, while the casters beside the bounds, as seen from the
+     * light, or beyond them do not.
+     *
+     * The shadow is updated as {@link shadowUpdateMode} specifies, and is rendered again when
+     * the bounds change. {@link numCascades}, {@link shadowDistance}, {@link cascadeBlend} and
+     * {@link cascadeDistribution} are not used while the bounds are set. Affects directional
+     * lights only. The bounds are copied, so modify and set them again to update them. Defaults
+     * to null.
+     *
+     * @type {BoundingBox|null}
+     * @example
+     * // the shadow covers a 10 x 4 x 10 area around the origin
+     * entity.light.shadowBounds = new BoundingBox(new Vec3(0, 2, 0), new Vec3(5, 2, 5));
+     * @example
+     * // the shadow follows an object, updated each frame
+     * bounds.center.copy(object.getPosition());
+     * entity.light.shadowBounds = bounds;
+     */
+    set shadowBounds(value) {
+        this._light.shadowBounds = value;
+    }
+
+    /**
+     * Gets the world space bounds enclosing the shadow casters of a directional light.
+     *
+     * @type {BoundingBox|null}
+     */
+    get shadowBounds() {
+        return this._light.shadowBounds;
     }
 
     /**
@@ -440,6 +518,27 @@ class LightComponent extends Component {
      */
     get shadowIntensity() {
         return this._light.shadowIntensity;
+    }
+
+    /**
+     * Sets a multiplier of the light's contribution to the volumetric fog, allowing individual
+     * lights to scatter more or less light than the others, or none at all when set to 0. Only
+     * used by omni and spot lights, when {@link CameraFrame} renders volumetric fog with local
+     * lights enabled. Defaults to 1.
+     *
+     * @type {number}
+     */
+    set volumetricScattering(value) {
+        this._light.volumetricScattering = value;
+    }
+
+    /**
+     * Gets the multiplier of the light's contribution to the volumetric fog.
+     *
+     * @type {number}
+     */
+    get volumetricScattering() {
+        return this._light.volumetricScattering;
     }
 
     /**
@@ -482,8 +581,8 @@ class LightComponent extends Component {
     }
 
     /**
-     * Sets the number of shadow cascades. Can be 1, 2, 3 or 4. Defaults to 1, representing no
-     * cascades.
+     * Sets the number of shadow cascades. Can be 1, 2, 3 or 4. Not used while
+     * {@link shadowBounds} are set. Defaults to 1, representing no cascades.
      *
      * @type {number}
      */
@@ -503,7 +602,9 @@ class LightComponent extends Component {
     /**
      * Sets the blend factor for cascaded shadow maps, defining the fraction of each cascade level
      * used for blending between adjacent cascades. The value should be between 0 and 1. Defaults
-     * to 0, which disables blending between cascades.
+     * to 0, which disables blending between cascades and fading at the shadow distance. Also fades
+     * shadows to fully lit over this fraction of the shadow distance, including when using a single
+     * cascade. For example, a value of 0.1 fades shadows over the last 10% of the shadow distance.
      *
      * @type {number}
      */
@@ -776,11 +877,11 @@ class LightComponent extends Component {
     }
 
     /**
-     * Sets the id of the texture asset to be used as the cookie for this light. Only spot and
+     * Sets the texture asset, or its id, to be used as the cookie for this light. Only spot and
      * omni lights can have cookies. Spot lights expect a 2D texture; omni lights expect a
      * cubemap. Defaults to null.
      *
-     * @type {number|null}
+     * @param {Asset|number|null} value - The texture asset, its id, or null for no cookie.
      */
     set cookieAsset(value) {
         if (
@@ -1002,12 +1103,12 @@ class LightComponent extends Component {
 
     /**
      * Sets the bitmask that determines which {@link MeshInstance}s are lit by this light. The
-     * value is composed from {@link MASK_AFFECT_DYNAMIC}, {@link MASK_AFFECT_LIGHTMAPPED} and
-     * {@link MASK_BAKE}. The {@link affectDynamic}, {@link affectLightmapped} and {@link bake}
-     * helpers write to the same underlying mask but maintain their own state and are not
-     * recomputed from `mask`, so writing `mask` directly will not update those helpers (and a
-     * subsequent write to a helper may overwrite bits set via `mask`). Defaults to
-     * {@link MASK_AFFECT_DYNAMIC}.
+     * value is composed from `MASK_AFFECT_DYNAMIC`, `MASK_AFFECT_LIGHTMAPPED` and
+     * `MASK_BAKE`; other bits are ignored. The {@link affectDynamic},
+     * {@link affectLightmapped} and {@link bake} helpers write to the same underlying mask but
+     * maintain their own state and are not recomputed from `mask`, so writing `mask` directly
+     * will not update those helpers (and a subsequent write to a helper may overwrite bits set via
+     * `mask`). Defaults to `MASK_AFFECT_DYNAMIC`.
      *
      * @type {number}
      */
@@ -1026,7 +1127,7 @@ class LightComponent extends Component {
 
     /**
      * Sets whether the light will affect non-lightmapped objects. Toggles the
-     * {@link MASK_AFFECT_DYNAMIC} bit on {@link mask}. Defaults to true.
+     * `MASK_AFFECT_DYNAMIC` bit on {@link mask}. Defaults to true.
      *
      * @type {boolean}
      */
@@ -1052,7 +1153,7 @@ class LightComponent extends Component {
 
     /**
      * Sets whether the light will affect lightmapped objects. Toggles the
-     * {@link MASK_AFFECT_LIGHTMAPPED} bit on {@link mask}. Mutually exclusive with {@link bake} on
+     * `MASK_AFFECT_LIGHTMAPPED` bit on {@link mask}. Mutually exclusive with {@link bake} on
      * the mask: enabling one clears the other's mask bit. Defaults to false.
      *
      * @type {boolean}
@@ -1079,7 +1180,7 @@ class LightComponent extends Component {
     }
 
     /**
-     * Sets whether the light will be rendered into lightmaps. Toggles the {@link MASK_BAKE} bit
+     * Sets whether the light will be rendered into lightmaps. Toggles the `MASK_BAKE` bit
      * on {@link mask}. Mutually exclusive with {@link affectLightmapped} on the mask: enabling one
      * clears the other's mask bit. Defaults to false.
      *
@@ -1177,7 +1278,7 @@ class LightComponent extends Component {
     /**
      * Gets the array of layer IDs ({@link Layer#id}) to which this light should belong.
      *
-     * @type {number[]}
+     * @type {ReadonlyArray<number>}
      */
     get layers() {
         return this._layers;
@@ -1312,10 +1413,12 @@ class LightComponent extends Component {
         if (this.enabled && this.entity.enabled) {
             this.addLightToLayers();
         }
-        oldComp.off('add', this.onLayerAdded, this);
-        oldComp.off('remove', this.onLayerRemoved, this);
-        newComp.on('add', this.onLayerAdded, this);
-        newComp.on('remove', this.onLayerRemoved, this);
+
+        // store the new handles, so that onDisable can unsubscribe from the current composition
+        this._evtLayerAdded?.off();
+        this._evtLayerAdded = newComp.on('add', this.onLayerAdded, this);
+        this._evtLayerRemoved?.off();
+        this._evtLayerRemoved = newComp.on('remove', this.onLayerRemoved, this);
     }
 
     onLayerAdded(layer) {
@@ -1380,7 +1483,7 @@ class LightComponent extends Component {
             return;
         }
 
-        this.cookie = this._cookieAsset.resource;
+        this.cookie = /** @type {Texture} */ (this._cookieAsset.resource);
     }
 
     onCookieAssetRemove() {
@@ -1447,7 +1550,7 @@ class LightComponent extends Component {
         this.removeLightFromLayers();
     }
 
-    onRemove() {
+    onBeforeRemove() {
         // remove from layers
         this.onDisable();
 

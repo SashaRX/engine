@@ -48,6 +48,13 @@ import wgslContainerSimpleRead from '../shader-lib/wgsl/chunks/gsplat/vert/forma
  */
 const serializeStreams = streams => streams.map(s => `${s.name}:${s.format}:${s.storage}`).join(',');
 
+// Monotonic across all GSplatFormat instances, so a version handed out by one format object can
+// never collide with one handed out by another. Consumers cache a format's version and rebuild
+// their pipelines when it changes; a per-instance counter starting at 0 would let a wholesale
+// format swap (see GSplatParams#dataFormat) reuse a version they already consider current, and
+// their `!==` change detection would silently miss it.
+let versionCounter = 0;
+
 // Pre-compiled regex patterns for template replacement
 const RE_NAME = /\{name\}/g;
 const RE_SAMPLER = /\{sampler\}/g;
@@ -112,6 +119,17 @@ class GSplatFormat {
     allowStreamRemoval = false;
 
     /**
+     * Work buffer data layout identifier (one of GSPLATDATA_*), or null for resource formats.
+     * Set by {@link GSplatParams} when creating a work buffer format. Identifies how transform
+     * data is encoded, so consumers (e.g. the work-buffer-sourced spherical harmonics update)
+     * can select the matching decode without inspecting individual stream pixel formats.
+     *
+     * @type {string|null}
+     * @ignore
+     */
+    dataFormat = null;
+
+    /**
      * Extra streams added via addExtraStreams(). For resource formats, streams can only be
      * added, never removed. For work buffer formats (where {@link allowStreamRemoval} is true),
      * streams can also be removed via {@link removeExtraStreams}.
@@ -130,11 +148,12 @@ class GSplatFormat {
     _streamNames = new Set();
 
     /**
-     * Version counter that increments when extra streams change.
+     * Change token, refreshed from the shared counter when extra streams change. Never repeats
+     * a value used by any other format instance.
      *
      * @private
      */
-    _extraStreamsVersion = 0;
+    _extraStreamsVersion = ++versionCounter;
 
     /**
      * Cached hash value.
@@ -211,7 +230,9 @@ class GSplatFormat {
     }
 
     /**
-     * Returns the version counter. Increments when extra streams change.
+     * Returns an opaque change token that changes when extra streams change. Values are unique
+     * across format instances, so comparing it against a cached copy also detects a wholesale
+     * format swap (e.g. {@link GSplatParams#dataFormat}) and not just in-place stream edits.
      *
      * @type {number}
      * @ignore
@@ -293,7 +314,7 @@ class GSplatFormat {
         }
 
         if (added) {
-            this._extraStreamsVersion++;
+            this._extraStreamsVersion = ++versionCounter;
             this._invalidateCaches();
         }
     }
@@ -323,7 +344,7 @@ class GSplatFormat {
         }
 
         if (removed) {
-            this._extraStreamsVersion++;
+            this._extraStreamsVersion = ++versionCounter;
             this._invalidateCaches();
         }
     }

@@ -13,6 +13,20 @@ class WebgpuDynamicBuffers extends DynamicBuffers {
      */
     pendingStagingBuffers = [];
 
+    destroy() {
+        // Loss can interrupt a frame before its active allocations have been submitted.
+        this.scheduleSubmit();
+        for (const { gpuBuffer, stagingBuffer } of this.usedBuffers) {
+            gpuBuffer.destroy(this.device);
+            stagingBuffer.destroy(this.device);
+        }
+        for (const stagingBuffer of this.pendingStagingBuffers) {
+            stagingBuffer.destroy(this.device);
+        }
+        this.pendingStagingBuffers.length = 0;
+        super.destroy();
+    }
+
     createBuffer(device, size, isStaging) {
         return new WebgpuDynamicBuffer(device, size, isStaging);
     }
@@ -74,17 +88,22 @@ class WebgpuDynamicBuffers extends DynamicBuffers {
      * Called when all scheduled command buffers are submitted to the device.
      */
     onCommandBuffersSubmitted() {
-        // map the staging buffers for write to alow them to be reused - this resolves when the CBs
+        // map the staging buffers for write to allow them to be reused - this resolves when the CBs
         // using them are done on the GPU
         const count = this.pendingStagingBuffers.length;
         if (count) {
+            const device = this.device;
             for (let i = 0; i < count; i++) {
                 const stagingBuffer = this.pendingStagingBuffers[i];
-                stagingBuffer.buffer.mapAsync(GPUMapMode.WRITE).then(() => {
-                    // the buffer can be mapped after the device has been destroyed, so test for that
-                    if (this.stagingBuffers) {
+                device.mapBufferAsync(stagingBuffer.buffer, GPUMapMode.WRITE).then((mapped) => {
+                    // the mapping fails when the device is lost, and can also complete after the
+                    // device has been destroyed - in either case the buffer cannot be reused, so
+                    // destroy it to release its memory and vram tracking
+                    if (mapped && this.stagingBuffers) {
                         stagingBuffer.onAvailable();
                         this.stagingBuffers.push(stagingBuffer);
+                    } else {
+                        stagingBuffer.destroy(device);
                     }
                 });
             }

@@ -8,15 +8,17 @@ import { DebugGraphics } from '../../platform/graphics/debug-graphics.js';
 import { PIXELFORMAT_RGBA32U } from '../../platform/graphics/constants.js';
 import { Texture } from '../../platform/graphics/texture.js';
 import { TextureUtils } from '../../platform/graphics/texture-utils.js';
+import { PROJECTION_ORTHOGRAPHIC } from '../constants.js';
+import { lodDebugColorIndex } from './gsplat-lod-colors.js';
 
 /**
  * @import { GSplatInfo } from './gsplat-info.js'
  * @import { GraphNode } from '../graph-node.js'
- * @import { RenderTarget } from '../../platform/graphics/render-target.js'
  * @import { GSplatWorkBuffer } from './gsplat-work-buffer.js'
  */
 
 const _viewMat = new Mat4();
+const _invModelMat = new Mat4();
 const _modelScale = new Vec3();
 const _modelRotation = new Quat();
 const _tmpSize = new Vec2();
@@ -52,11 +54,23 @@ class GSplatWorkBufferRenderPass extends RenderPass {
     /** @type {boolean} */
     colorOnly;
 
+    /**
+     * True when any splat in the current pass sources geometry from the work buffer (see
+     * GSplatResourceBase#supportsWorkBufferGeometry). Computed in update(); gates the
+     * work-buffer-geometry uniform setup in execute() so non-opted-in passes skip it.
+     *
+     * @type {boolean}
+     */
+    _usesWorkBufferGeometry = false;
+
     /** @type {Float32Array} */
     _modelScaleData = new Float32Array(3);
 
     /** @type {Float32Array} */
     _modelRotationData = new Float32Array(4);
+
+    /** @type {Float32Array} */
+    _cameraPositionData = new Float32Array(3);
 
     /** @type {Int32Array} */
     _textureSize = new Int32Array(2);
@@ -88,17 +102,6 @@ class GSplatWorkBufferRenderPass extends RenderPass {
         this.splats.length = 0;
         this._subDrawTexture.destroy();
         super.destroy();
-    }
-
-    /**
-     * Initialize the render pass with the specified render target.
-     *
-     * @param {RenderTarget} renderTarget - The target to render to.
-     */
-    init(renderTarget) {
-        super.init(renderTarget);
-        this.colorOps.clear = false;
-        this.depthStencilOps.clearDepth = false;
     }
 
     /**
@@ -180,12 +183,16 @@ class GSplatWorkBufferRenderPass extends RenderPass {
         }
 
         // Lazily create per-splat sub-draw textures only for splats that will use them
-        // (those not using the shared partial texture, i.e. _partialData count === 0).
+        // (those not using the shared partial texture, i.e. _partialData count === 0). Also
+        // record whether any splat sources geometry from the work buffer (used by execute()).
+        let usesWorkBufferGeometry = false;
         for (let i = 0; i < this.splats.length; i++) {
             if (this._partialData[i * 2 + 1] === 0) {
                 this.splats[i].ensureSubDrawTexture(textureWidth);
             }
+            usesWorkBufferGeometry ||= this.splats[i].resource.supportsWorkBufferGeometry;
         }
+        this._usesWorkBufferGeometry = usesWorkBufferGeometry;
 
         this.cameraNode = cameraNode;
         return this.splats.length > 0;
@@ -203,6 +210,24 @@ class GSplatWorkBufferRenderPass extends RenderPass {
         const viewInvMat = cameraNode.getWorldTransform();
         const viewMat = _viewMat.copy(viewInvMat).invert();
         device.scope.resolve('matrix_view').setValue(viewMat.data);
+
+        // spherical harmonics are evaluated along the camera forward for orthographic cameras
+        const ortho = cameraNode.camera.projection === PROJECTION_ORTHOGRAPHIC;
+        device.scope.resolve('uCameraOrtho').setValue(ortho ? 1 : 0);
+
+        // work-buffer-sourced geometry inputs for color-only (SH) updates. These are consumed
+        // only by shaders compiled with GSPLAT_WORKBUFFER_GEOMETRY, so skip the setup unless a
+        // splat in this pass opts in (see GSplatResourceBase#supportsWorkBufferGeometry).
+        if (this.colorOnly && this._usesWorkBufferGeometry) {
+            device.scope.resolve('uWorkBufferTransformA').setValue(this.workBuffer.getTexture('dataTransformA'));
+            device.scope.resolve('uWorkBufferTransformB').setValue(this.workBuffer.getTexture('dataTransformB'));
+
+            const cameraPos = cameraNode.getPosition();
+            this._cameraPositionData[0] = cameraPos.x;
+            this._cameraPositionData[1] = cameraPos.y;
+            this._cameraPositionData[2] = cameraPos.z;
+            device.scope.resolve('uCameraPosition').setValue(this._cameraPositionData);
+        }
 
         // render each splat info
         for (let i = 0; i < splats.length; i++) {
@@ -243,19 +268,19 @@ class GSplatWorkBufferRenderPass extends RenderPass {
         const formatDeclarations = resource.format.getInputDeclarations();
 
         // quad renderer and material are cached in the resource
-        const workBufferRenderInfo = resource.getWorkBufferRenderInfo(
+        const workBufferRenderInfo = this.workBuffer.getRenderInfo(
+            resource,
             this.colorOnly,
             workBufferModifier,
             formatHash,
-            formatDeclarations,
-            this.workBuffer.format
+            formatDeclarations
         );
 
         // Assign material properties to scope
         workBufferRenderInfo.material.setParameters(device);
 
-        // Colorize by LOD using provided colors; use index 0 as fallback for non-LOD splats
-        const color = this.colorsByLod?.[splatInfo.lodIndex] ?? this.colorsByLod?.[0] ?? _whiteColor;
+        // Colorize by LOD using provided colors; levels past the palette share its last color
+        const color = this.colorsByLod?.[lodDebugColorIndex(splatInfo.lodIndex)] ?? _whiteColor;
         scope.resolve('uColorMultiply').setValue(color);
 
         // Decompose model matrix into scale and rotation
@@ -281,8 +306,18 @@ class GSplatWorkBufferRenderPass extends RenderPass {
         scope.resolve('model_scale').setValue(this._modelScaleData);
         scope.resolve('model_rotation').setValue(this._modelRotationData);
 
+        // inverse model matrix, used by GSPLAT_WORKBUFFER_GEOMETRY shaders to convert stored
+        // world-space data back to local space (only resources that opt in compile that path)
+        if (this.colorOnly && resource.supportsWorkBufferGeometry) {
+            _invModelMat.copy(worldTransform).invert();
+            scope.resolve('matrix_model_inverse').setValue(_invModelMat.data);
+        }
+
         // Set placement ID for picking (unconditionally - cheap even if shader doesn't use it)
         scope.resolve('uId').setValue(splatInfo.placementId);
+
+        // anti-aliasing flag, stored per splat by writeSplat
+        scope.resolve('uAntiAlias').setValue(resource.antiAlias ? 1 : 0);
 
         // Apply per-instance shader parameters
         if (splatInfo.parameters) {

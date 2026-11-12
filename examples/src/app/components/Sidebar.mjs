@@ -1,18 +1,32 @@
 import { Observer } from '@playcanvas/observer';
-import { BindingTwoWay, BooleanInput, Container, Label, LabelGroup, Panel, TextInput } from '@playcanvas/pcui/react';
+import { Container, Label, Panel, TextInput } from '@playcanvas/pcui/react';
 import { Component } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 
-import { exampleMetaData } from '../../../cache/metadata.mjs';
-import { MIN_DESKTOP_WIDTH, VERSION } from '../constants.mjs';
+import { CATEGORY_PANEL_ID, CategoryPanel } from './CategoryPanel.mjs';
+import { byName, getCategories, getFirstExample } from '../categories.mjs';
+import { VERSION } from '../constants.mjs';
 import { iframe } from '../iframe.mjs';
 import { jsx } from '../jsx.mjs';
 import { thumbnailPath } from '../paths.mjs';
-import { getOrientation } from '../utils.mjs';
+import { toDisplayName } from '../strings.mjs';
+import { patchState, readState } from '../url-state.mjs';
+import { getLayout } from '../utils.mjs';
+
+/**
+ * @import { ReactElement } from 'react'
+ * @import { Location, NavigateFunction } from 'react-router-dom'
+ */
 
 /**
  * @typedef {object} Props
- * @property {{ pathname: string, hash: string }} location - The router location.
+ * @property {Location} location - The router location.
+ * @property {string} examplePath - The resolved example path.
+ * @property {NavigateFunction} navigate - Navigate to another route.
+ * @property {'mobile'|'desktop'} [layout] - Current layout.
+ * @property {null|'examples'|'code'|'controls'|'description'} [mobilePanel] - Active mobile panel.
+ * @property {(mobilePanel: null|'examples'|'code'|'controls'|'description') => void} [setMobilePanel] - Set active mobile panel.
+ * @property {(event: PointerEvent | import('react').PointerEvent<HTMLElement>) => void} [onMobilePanelDragStart] - Start mobile panel drag.
  */
 
 /**
@@ -21,7 +35,9 @@ import { getOrientation } from '../utils.mjs';
  * @property {Record<string, Record<string, object>>|null} filteredCategories - The filtered categories.
  * @property {Observer} observer - The observer.
  * @property {boolean} collapsed - Collapsed or not.
- * @property {string} orientation - Current orientation.
+ * @property {Record<string, boolean>} collapsedCategories - Collapsed state per category.
+ * @property {string} filterText - The current filter.
+ * @property {'mobile'|'desktop'} layout - Current layout.
  */
 
 /**
@@ -30,40 +46,140 @@ import { getOrientation } from '../utils.mjs';
 const TypedComponent = Component;
 
 /**
- * @returns {Record<string, { examples: Record<string, string> }>} - The category files.
+ * @param {Props['location']} location - The router location.
+ * @returns {string | null} Category the URL asked to focus on, if any.
  */
-function getDefaultExampleFiles() {
-    /** @type {Record<string, { examples: Record<string, string> }>} */
-    const categories = {};
-    for (let i = 0; i < exampleMetaData.length; i++) {
-        const { categoryKebab, exampleNameKebab, hidden } = exampleMetaData[i];
+const focusedCategory = (location) => {
+    const [, category, example] = location.pathname.split('/');
+    return !example && category && getFirstExample(category) ? category : null;
+};
 
-        // hidden examples are always built and reachable via URL, but are only listed in the
-        // sidebar during development (`npm run develop`), not in production builds (`npm run build`)
-        if (hidden && process.env.NODE_ENV !== 'development') {
-            continue;
-        }
-
-        if (!categories[categoryKebab]) {
-            categories[categoryKebab] = { examples: {} };
-        }
-
-        categories[categoryKebab].examples[exampleNameKebab] = exampleNameKebab;
+/**
+ * Every category other than `focusCategory` starts collapsed, so a bare
+ * `#/<category>` URL opens the sidebar showing just that category. Without a
+ * focus category (any normal example URL) all categories stay expanded.
+ *
+ * @param {Record<string, any>} categories - The default categories.
+ * @param {string | null} focusCategory - Category to keep expanded.
+ * @returns {Record<string, boolean>} Collapsed state per category.
+ */
+const collapseAllBut = (categories, focusCategory) => {
+    /** @type {Record<string, boolean>} */
+    const collapsedCategories = {};
+    if (!focusCategory) {
+        return collapsedCategories;
     }
-    return categories;
+    for (const category of Object.keys(categories)) {
+        collapsedCategories[category] = category !== focusCategory;
+    }
+    return collapsedCategories;
+};
+
+/**
+ * Split a filter string into exact-match `category:`/`example:` tags and fuzzy free-text terms.
+ *
+ * @param {string} filter - Filter string.
+ * @returns {{ cats: string[], exs: string[], text: string }} Parsed tags and joined free text.
+ */
+function parseFilter(filter) {
+    /** @type {string[]} */
+    const cats = [];
+    /** @type {string[]} */
+    const exs = [];
+    /** @type {string[]} */
+    const terms = [];
+    filter.trim().split(/\s+/).forEach((tok) => {
+        const tag = /^(category|example):(.+)$/i.exec(tok);
+        if (!tag) {
+            if (tok) {
+                terms.push(tok);
+            }
+            return;
+        }
+        (tag[1].toLowerCase() === 'category' ? cats : exs).push(tag[2].toLowerCase());
+    });
+    // whitespace between free-text terms stays fuzzy, preserving the old behavior
+    return { cats, exs, text: terms.join('.*') };
 }
+
+/**
+ * @param {Record<string, Record<string, any>>} defaultCategories - Default categories.
+ * @param {string} filter - Filter string.
+ * @returns {Record<string, Record<string, any>> | null} Filtered categories.
+ */
+function filterCategories(defaultCategories, filter) {
+    const { cats, exs, text } = parseFilter(filter);
+    if (!cats.length && !exs.length && !text) {
+        return null;
+    }
+    const reg = text ? new RegExp(text, 'i') : null;
+
+    /** @type {Record<string, Record<string, any>>} */
+    const updatedCategories = {};
+    Object.keys(defaultCategories).forEach((category) => {
+        // category: tags require an exact (case-insensitive) category name
+        if (cats.length && !cats.includes(category.toLowerCase())) {
+            return;
+        }
+        Object.keys(defaultCategories[category].examples).forEach((example) => {
+            const title = defaultCategories[category].examples[example];
+            // example: tags require an exact (case-insensitive) example name
+            if (exs.length && !exs.includes(example.toLowerCase())) {
+                return;
+            }
+            // any remaining free text fuzzy-matches the category or example name
+            if (reg && category.search(reg) === -1 && title.search(reg) === -1) {
+                return;
+            }
+            if (!updatedCategories[category]) {
+                updatedCategories[category] = { ...defaultCategories[category], examples: {} };
+            }
+            updatedCategories[category].examples[example] = title;
+        });
+    });
+    return updatedCategories;
+}
+
+/**
+ * @param {Props['location']} location - The router location.
+ * @returns {State} The initial state.
+ */
+const createState = (location) => {
+    const ui = readState().ui ?? {};
+    const filter = !focusedCategory(location) && typeof ui.filter === 'string' ? ui.filter : '';
+    const largeThumbnails = typeof ui.largeThumbnails === 'boolean' ? ui.largeThumbnails : false;
+    const collapsed = typeof ui.sideBarCollapsed === 'boolean' ?
+        ui.sideBarCollapsed :
+        localStorage.getItem('sideBarCollapsed') === 'true' || getLayout() === 'mobile';
+    const defaultCategories = getCategories();
+    return {
+        defaultCategories,
+        filteredCategories: filterCategories(defaultCategories, filter),
+        filterText: filter,
+        observer: new Observer({ largeThumbnails }),
+        collapsed,
+        collapsedCategories: collapseAllBut(defaultCategories, focusedCategory(location)),
+        layout: getLayout()
+    };
+};
 
 class SideBar extends TypedComponent {
     /** @type {State} */
-    state = {
-        defaultCategories: getDefaultExampleFiles(),
-        filteredCategories: null,
-        filterText: '',
-        observer: new Observer({ largeThumbnails: false }),
-        // @ts-ignore
-        collapsed: localStorage.getItem('sideBarCollapsed') === 'true' || window.top.innerWidth < MIN_DESKTOP_WIDTH,
-        orientation: getOrientation()
-    };
+    state = createState(this.props.location);
+
+    /** @type {WeakSet<object>} */
+    _categoryPanels = new WeakSet();
+
+    /** @type {HTMLElement | null} */
+    _sideBar = null;
+
+    /** @type {string} */
+    _sideBarLayout = '';
+
+    /** @type {{ unbind: () => void } | null} */
+    _largeThumbnailsHandle = null;
+
+    _scrollFrame = 0;
 
     /**
      * @param {Props} props - Component properties.
@@ -72,31 +188,162 @@ class SideBar extends TypedComponent {
         super(props);
         this._onLayoutChange = this._onLayoutChange.bind(this);
         this._onClickExample = this._onClickExample.bind(this);
+        this._onLargeThumbnailsSet = this._onLargeThumbnailsSet.bind(this);
+    }
+
+    /**
+     * PCUI owns the visual collapse of a category panel, but the React wrapper writes
+     * every prop with a setter back onto the element on each render — so a header click
+     * has to be mirrored into state, or the next render snaps the panel back.
+     *
+     * @param {string} category - Category name.
+     * @param {boolean} collapsed - Collapsed state after the click.
+     */
+    _onCategoryToggle(category, collapsed) {
+        this.setState((prevState) => {
+            // while filtering, panels are force-expanded so matches can't hide in one
+            if (prevState.filterText || Boolean(prevState.collapsedCategories[category]) === collapsed) {
+                return null;
+            }
+            return {
+                collapsedCategories: { ...prevState.collapsedCategories, [category]: collapsed }
+            };
+        });
+    }
+
+    /**
+     * Category panels are created by PCUI, so their collapse events are only reachable
+     * through the element behind the DOM node. Each panel is subscribed once.
+     */
+    setupCategoryPanels() {
+        const panels = document.querySelectorAll(`[id^="${CATEGORY_PANEL_ID}"]`);
+        for (const dom of panels) {
+            const panel = /** @type {any} */ (dom).ui;
+            if (!panel || this._categoryPanels.has(panel)) {
+                continue;
+            }
+            this._categoryPanels.add(panel);
+            const category = dom.id.slice(CATEGORY_PANEL_ID.length);
+            panel.on('collapse', () => this._onCategoryToggle(category, true));
+            panel.on('expand', () => this._onCategoryToggle(category, false));
+        }
+    }
+
+    setupSideBar() {
+        const sideBar = document.getElementById('sideBar');
+        const layout = this.props.layout ?? this.state.layout;
+        if (!sideBar || (this._sideBar === sideBar && this._sideBarLayout === layout)) {
+            return;
+        }
+        this._sideBar = sideBar;
+        this._sideBarLayout = layout;
+        const drag = this.props.onMobilePanelDragStart;
+        sideBar.onpointerdown = layout === 'mobile' && drag ? event => drag(event) : null;
+
+        // PCUI should just have a "onHeaderClick" but can't find anything
+        const sideBarHeader = /** @type {HTMLElement | null} */ (
+            /** @type {unknown} */ (sideBar.querySelector('.pcui-panel-header'))
+        );
+        if (sideBarHeader) {
+            sideBarHeader.onclick = layout === 'mobile' ? null : () => this.toggleCollapse();
+            sideBarHeader.onpointerdown = null;
+            // shown as a badge next to the title by the stylesheet
+            sideBarHeader.querySelector('.pcui-panel-header-title')?.setAttribute('data-version', `v${VERSION}`);
+        }
+        this.setupControlPanelToggleButton();
     }
 
     componentDidMount() {
-        // PCUI should just have a "onHeaderClick" but can't find anything
-        const sideBar = document.getElementById('sideBar');
-        if (!sideBar) {
-            return;
+        if (focusedCategory(this.props.location)) {
+            patchState({ ui: { filter: '' } });
         }
-
-        /** @type {HTMLElement | null} */
-        const sideBarHeader = sideBar.querySelector('.pcui-panel-header');
-        if (!sideBarHeader) {
-            return;
-        }
-        sideBarHeader.onclick = () => this.toggleCollapse();
-        this.setupControlPanelToggleButton();
-
-        // setup events
+        this._largeThumbnailsHandle = this.state.observer.on('largeThumbnails:set', this._onLargeThumbnailsSet);
+        this.setupSideBar();
+        this.setupCategoryPanels();
         window.addEventListener('resize', this._onLayoutChange);
         window.addEventListener('orientationchange', this._onLayoutChange);
     }
 
+    /**
+     * @param {Props} prevProps - The previous properties.
+     * @param {State} prevState - The previous state.
+     */
+    componentDidUpdate(prevProps, prevState) {
+        this.setupSideBar();
+        this.setupCategoryPanels();
+        if (prevState.filterText && !this.state.filterText) {
+            this._scrollToElement('#sideBar-contents .nav-item.selected');
+        }
+        const category = focusedCategory(this.props.location);
+        const expandAll = this.props.location.state?.expandAllCategories === true;
+        if ((category || expandAll) && prevProps.location.key !== this.props.location.key) {
+            patchState({ ui: { filter: '' } });
+            this.setState({
+                filterText: '',
+                filteredCategories: null,
+                collapsedCategories: collapseAllBut(this.state.defaultCategories, category)
+            }, () => {
+                if (category) {
+                    this._scrollToCategory(category);
+                } else {
+                    this._scrollToElement('#sideBar-contents .nav-item.selected');
+                }
+            });
+        }
+    }
+
+    _expandAll = () => {
+        this.props.navigate(this.props.examplePath, { state: { expandAllCategories: true } });
+    };
+
+    /**
+     * @param {string} category - Category whose header should be visible.
+     */
+    _scrollToCategory(category) {
+        this._scrollToElement(`#${CATEGORY_PANEL_ID}${category} .pcui-panel-header`);
+    }
+
+    /**
+     * @param {string} selector - Element to reveal after category panels finish resizing.
+     */
+    _scrollToElement(selector) {
+        cancelAnimationFrame(this._scrollFrame);
+        // PCUI applies collapsed panel sizes in an animation frame after the React update.
+        this._scrollFrame = requestAnimationFrame(() => {
+            this._scrollFrame = requestAnimationFrame(() => {
+                this._scrollFrame = 0;
+                document.querySelector(selector)?.scrollIntoView({ block: 'nearest' });
+            });
+        });
+    }
+
     componentWillUnmount() {
+        cancelAnimationFrame(this._scrollFrame);
+        this._largeThumbnailsHandle?.unbind();
+        this._largeThumbnailsHandle = null;
         window.removeEventListener('resize', this._onLayoutChange);
         window.removeEventListener('orientationchange', this._onLayoutChange);
+    }
+
+    _onLargeThumbnailsSet() {
+        const large = this.state.observer.get('largeThumbnails') === true;
+        patchState({ ui: { largeThumbnails: large } });
+        const sideBar = document.getElementById('sideBar');
+        const contents = document.getElementById('sideBar-contents');
+        if (!sideBar || !contents) {
+            return;
+        }
+
+        // keep the item at the top of the list in view across the size change
+        const top = contents.getBoundingClientRect().top;
+        const navItems = /** @type {NodeListOf<HTMLElement>} */ (
+            /** @type {unknown} */ (contents.querySelectorAll('.nav-item'))
+        );
+        const topItem = Array.from(navItems).find((nav) => {
+            return !nav.closest('.pcui-collapsed') && nav.getBoundingClientRect().bottom > top;
+        });
+        sideBar.classList.toggle('small-thumbnails', !large);
+        topItem?.scrollIntoView();
     }
 
     setupControlPanelToggleButton() {
@@ -105,28 +352,24 @@ class SideBar extends TypedComponent {
         if (!sideBar) {
             return;
         }
-        this.state.observer.on('largeThumbnails:set', () => {
-            let minTopNavItemDistance = Number.MAX_VALUE;
-
-            /** @type {NodeListOf<HTMLElement>} */
-            const navItems = document.querySelectorAll('.nav-item');
-            for (let i = 0; i < navItems.length; i++) {
-                const nav = navItems[i];
-                const navItemDistance = Math.abs(120 - nav.getBoundingClientRect().top);
-                if (navItemDistance < minTopNavItemDistance) {
-                    minTopNavItemDistance = navItemDistance;
-                    sideBar.classList.toggle('small-thumbnails');
-                    nav.scrollIntoView();
-                    break;
-                }
-            }
-        });
         sideBar.classList.add('visible');
         // when first opening the examples browser via a specific example, scroll it into view
         // @ts-ignore
         if (!window._scrolledToExample) {
-            const examplePath = location.hash.split('/');
-            document.getElementById(`link-${examplePath[1]}-${examplePath[2]}`)?.scrollIntoView();
+            const category = focusedCategory(this.props.location);
+            if (category) {
+                this._scrollToCategory(category);
+            } else {
+                // start the list at the example's category so the examples before it stay in
+                // view, and only scroll further when the example itself would be off screen
+                const [, exampleCategory, example] = this.props.examplePath.split('/');
+                const contents = document.getElementById('sideBar-contents');
+                const panel = document.getElementById(`${CATEGORY_PANEL_ID}${exampleCategory}`);
+                if (contents && panel) {
+                    contents.scrollTop += panel.getBoundingClientRect().top - contents.getBoundingClientRect().top;
+                }
+                document.getElementById(`link-${exampleCategory}-${example}`)?.scrollIntoView({ block: 'nearest' });
+            }
             // @ts-ignore
             window._scrolledToExample = true;
         }
@@ -145,60 +388,80 @@ class SideBar extends TypedComponent {
         const { collapsed } = this.state;
         localStorage.setItem('sideBarCollapsed', `${!collapsed}`);
         this.mergeState({ collapsed: !collapsed });
+        patchState({ ui: { sideBarCollapsed: !collapsed } });
     }
 
     _onLayoutChange() {
-        this.mergeState({ orientation: getOrientation() });
+        this.mergeState({ layout: getLayout() });
     }
 
     /**
      * @param {string} filter - The filter string.
      */
     onChangeFilter(filter) {
-        this.mergeState({ filterText: filter });
-        const { defaultCategories } = this.state;
-        // Turn a filter like 'mes dec' (for mesh decals) into 'mes.*dec', because the examples
-        // show "MESH DECALS" but internally it's just "MeshDecals".
-        filter = filter.replace(/\s/g, '.*');
-        const reg = filter && filter.length > 0 ? new RegExp(filter, 'i') : null;
-        if (!reg) {
-            this.mergeState({ filteredCategories: defaultCategories });
-            return;
-        }
-        /** @type {Record<string, Record<string, object>>} */
-        const updatedCategories = {};
-        Object.keys(defaultCategories).forEach((category) => {
-            if (category.search(reg) !== -1) {
-                updatedCategories[category] = defaultCategories[category];
-                return null;
-            }
-            Object.keys(defaultCategories[category].examples).forEach((example) => {
-                // @ts-ignore
-                const title = defaultCategories[category].examples[example];
-                if (title.search(reg) !== -1) {
-                    if (!updatedCategories[category]) {
-                        updatedCategories[category] = {
-                            name: defaultCategories[category].name,
-                            examples: {
-                                [example]: title
-                            }
-                        };
-                    } else {
-                        // @ts-ignore
-                        updatedCategories[category].examples[example] = title;
-                    }
-                }
-            });
+        const { defaultCategories, collapsedCategories } = this.state;
+        const category = this.props.location.pathname.split('/')[1];
+        this.mergeState({
+            filterText: filter,
+            filteredCategories: filterCategories(defaultCategories, filter),
+            // Keep the current example visible when restoring the unfiltered categories.
+            collapsedCategories: !filter && collapsedCategories[category] ?
+                { ...collapsedCategories, [category]: false } : collapsedCategories
         });
-        this.mergeState({ filteredCategories: updatedCategories });
+        patchState({ ui: { filter } });
     }
 
     clearFilter() {
-        const input = document.querySelector('.filter-input input');
-        if (input) {
-            /** @type {HTMLInputElement} */ (input).value = '';
-        }
         this.onChangeFilter('');
+    }
+
+    /**
+     * @param {boolean} value - Show large thumbnails.
+     */
+    setLargeThumbnails(value) {
+        this.state.observer.set('largeThumbnails', value);
+    }
+
+    renderToolbar() {
+        const categories = this.state.filteredCategories || this.state.defaultCategories;
+        let count = 0;
+        for (const category of Object.values(categories)) {
+            count += Object.keys(category.examples).length;
+        }
+        const icon = (/** @type {string} */ d) => jsx('svg', {
+            viewBox: '0 0 24 24',
+            fill: 'none',
+            stroke: 'currentColor',
+            strokeWidth: 2,
+            strokeLinecap: 'round',
+            strokeLinejoin: 'round',
+            width: 14,
+            height: 14,
+            'aria-hidden': true
+        }, jsx('path', { d }));
+        return jsx(
+            'div',
+            { className: 'sideBar-toolbar' },
+            jsx('span', { className: 'sideBar-count' }, `${count} ${count === 1 ? 'example' : 'examples'}`),
+            jsx(
+                'div',
+                { className: 'thumb-mode' },
+                jsx('button', {
+                    type: 'button',
+                    className: 'thumb-mode-list',
+                    title: 'List view',
+                    'aria-label': 'List view',
+                    onClick: () => this.setLargeThumbnails(false)
+                }, icon('M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01')),
+                jsx('button', {
+                    type: 'button',
+                    className: 'thumb-mode-large',
+                    title: 'Large thumbnails',
+                    'aria-label': 'Large thumbnails',
+                    onClick: () => this.setLargeThumbnails(true)
+                }, icon('M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z'))
+            )
+        );
     }
 
     /**
@@ -218,18 +481,20 @@ class SideBar extends TypedComponent {
         if (Object.keys(categories).length === 0) {
             return jsx(Label, { text: 'No results' });
         }
-        const { pathname } = this.props.location;
+        const { examplePath } = this.props;
+        const { collapsedCategories, defaultCategories, filterText } = this.state;
+        const expandedCategories = Object.keys(defaultCategories).filter(category => !collapsedCategories[category]);
+        const onlyExpandedCategory = expandedCategories.length === 1 ? expandedCategories[0] : null;
         return Object.keys(categories)
-        .sort((a, b) => (a > b ? 1 : -1))
+        .sort(byName)
         .map((category) => {
             return jsx(
-                Panel,
+                CategoryPanel,
                 {
                     key: category,
-                    class: 'categoryPanel',
-                    headerText: category.split('-').join(' ').toUpperCase(),
-                    collapsible: true,
-                    collapsed: false
+                    category,
+                    onExpandAll: category === onlyExpandedCategory ? this._expandAll : undefined,
+                    collapsed: !filterText && collapsedCategories[category] === true
                 },
                 jsx(
                     'ul',
@@ -237,11 +502,11 @@ class SideBar extends TypedComponent {
                         className: 'category-nav'
                     },
                     Object.keys(categories[category].examples)
-                    .sort((a, b) => (a > b ? 1 : -1))
+                    .sort(byName)
                     .map((example) => {
                         const path = `/${category}/${example}`;
-                        const isSelected = pathname === path;
-                        const className = `nav-item ${isSelected ? 'selected' : null}`;
+                        const isSelected = examplePath === path;
+                        const className = `nav-item ${isSelected ? 'selected' : ''}`;
                         return jsx(
                             Link,
                             {
@@ -267,7 +532,7 @@ class SideBar extends TypedComponent {
                                     {
                                         className: 'nav-item-text'
                                     },
-                                    example.split('-').join(' ').toUpperCase()
+                                    toDisplayName(example)
                                 )
                             )
                         );
@@ -278,17 +543,24 @@ class SideBar extends TypedComponent {
     }
 
     render() {
-        const { observer, collapsed, orientation } = this.state;
+        const { observer, collapsed } = this.state;
+        const layout = this.props.layout ?? this.state.layout;
+        const smallThumbnails = observer.get('largeThumbnails') !== true;
         const panelOptions = {
-            headerText: `EXAMPLES - v${VERSION}`,
+            headerText: 'Examples',
+            headerSize: 44,
             collapsible: true,
             collapsed: false,
             id: 'sideBar',
-            class: ['small-thumbnails', collapsed ? 'collapsed' : null]
+            class: [...(smallThumbnails ? ['small-thumbnails'] : []), ...(collapsed ? ['collapsed'] : [])]
         };
-        if (orientation === 'portrait') {
-            panelOptions.class = ['small-thumbnails'];
-            panelOptions.collapsed = collapsed;
+        if (layout === 'mobile') {
+            if (this.props.mobilePanel !== 'examples') {
+                return null;
+            }
+            panelOptions.class = ['mobile-sheet', 'small-thumbnails'];
+            panelOptions.collapsible = false;
+            panelOptions.collapsed = false;
         }
         return jsx(
             Panel,
@@ -296,11 +568,12 @@ class SideBar extends TypedComponent {
             panelOptions,
             jsx(
                 Container,
-                { class: ['filter-container', this.state.filterText ? 'has-filter-text' : null] },
-                jsx(TextInput, {
+                { class: ['filter-container', ...(this.state.filterText ? ['has-filter-text'] : [])] },
+                jsx(/** @type {any} */ (TextInput), {
                     class: 'filter-input',
                     keyChange: true,
-                    placeholder: 'Filter...',
+                    placeholder: 'Search, category:, example:',
+                    value: this.state.filterText,
                     onChange: this.onChangeFilter.bind(this)
                 }),
                 this.state.filterText ? jsx(
@@ -312,27 +585,21 @@ class SideBar extends TypedComponent {
                     '\u2715'
                 ) : null
             ),
-            jsx(
-                LabelGroup,
-                { text: 'Large thumbnails:' },
-                jsx(BooleanInput, {
-                    type: 'toggle',
-                    binding: new BindingTwoWay(),
-                    link: { observer, path: 'largeThumbnails' }
-                })
-            ),
+            layout !== 'mobile' && this.renderToolbar(),
             jsx(Container, { id: 'sideBar-contents' }, this.renderContents())
         );
     }
 }
 
 /**
- * Wrapper component to provide router location to the class component.
- * @returns {JSX.Element} The SideBar component with router location.
+ * @param {Omit<Props, 'location'|'examplePath'|'navigate'>} props - Component properties.
+ * @returns {ReactElement} The SideBar component with router location.
  */
-function SideBarWithRouter() {
+function SideBarWithRouter(props) {
     const location = useLocation();
-    return jsx(SideBar, { location });
+    const navigate = useNavigate();
+    const { category = '', example = getFirstExample(category) } = useParams();
+    return jsx(SideBar, { ...props, location, navigate, examplePath: `/${category}/${example}` });
 }
 
 export { SideBarWithRouter as SideBar };

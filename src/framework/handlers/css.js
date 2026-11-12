@@ -1,6 +1,12 @@
-import { http } from '../../platform/net/http.js';
+import { TextParser } from '../parsers/text.js';
 import { ResourceHandler } from './handler.js';
 
+/**
+ * Resource handler for the `css` asset type. Loads a stylesheet file as a string. It does not
+ * apply the stylesheet to the page.
+ *
+ * @ignore
+ */
 class CssHandler extends ResourceHandler {
     /**
      * TextDecoder for decoding binary data.
@@ -12,26 +18,7 @@ class CssHandler extends ResourceHandler {
 
     constructor(app) {
         super(app, 'css');
-    }
-
-    load(url, callback) {
-        if (typeof url === 'string') {
-            url = {
-                load: url,
-                original: url
-            };
-        }
-
-        http.get(url.load, {
-            retry: this.maxRetries > 0,
-            maxRetries: this.maxRetries
-        }, (err, response) => {
-            if (!err) {
-                callback(null, response);
-            } else {
-                callback(`Error loading css resource: ${url.original} [${err}]`);
-            }
-        });
+        this.addParser(new TextParser());
     }
 
     /**

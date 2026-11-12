@@ -26,6 +26,15 @@
       "rangeStrategy": "widen"
     },
     {
+      "matchManagers": [
+        "npm"
+      ],
+      "matchPackageNames": [
+        "npm"
+      ],
+      "allowedVersions": "<12.0.0"
+    },
+    {
       "matchPackageNames": [
         "monaco-editor"
       ],
@@ -39,6 +48,12 @@
         "eslint"
       ],
       "allowedVersions": "<10.0.0"
+    },
+    {
+      "matchPackageNames": [
+        "typescript"
+      ],
+      "allowedVersions": "<6.0.0"
     }
   ],
   "ignorePaths": [

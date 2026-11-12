@@ -35,47 +35,24 @@ class GSplatSortBinWeights {
     }
 
     /**
-     * Pre-allocated interleaved array [base0, divider0, base1, divider1, ...].
-     *
-     * @type {Float32Array}
-     */
-    binWeights = new Float32Array(GSplatSortBinWeights.NUM_BINS * 2);
-
-    /**
-     * Pre-computed weight lookup table by distance from camera (constant).
-     *
-     * @type {Float32Array}
-     */
-    weightByDistance;
-
-    /**
-     * Pre-allocated scratch array for bits per bin calculation.
-     *
-     * @type {Float32Array}
-     */
-    bitsPerBin;
-
-    /**
-     * Cached cameraBin from last compute call.
-     */
-    lastCameraBin = -1;
-
-    /**
-     * Cached bucketCount from last compute call.
-     */
-    lastBucketCount = -1;
-
-    /**
      * Creates a new GSplatSortBinWeights instance.
+     *
+     * All instance state is assigned here rather than via class field declarations.
+     * This class is stringified into a Worker blob; with esbuild targeting es2020,
+     * class fields are transpiled into __publicField() helper calls whose helper
+     * isn't present in the worker scope, causing ReferenceError on construction.
      */
     constructor() {
         const numBins = GSplatSortBinWeights.NUM_BINS;
         const weightTiers = GSplatSortBinWeights.WEIGHT_TIERS;
 
-        // Pre-allocate scratch array
+        /** @type {Float32Array} Interleaved [base0, divider0, base1, divider1, ...]. */
+        this.binWeights = new Float32Array(numBins * 2);
+
+        /** @type {Float32Array} Scratch array for bits per bin calculation. */
         this.bitsPerBin = new Float32Array(numBins);
 
-        // Pre-compute weight lookup table by distance from camera (constant)
+        /** @type {Float32Array} Weight lookup table by distance from camera. */
         this.weightByDistance = new Float32Array(numBins);
         for (let dist = 0; dist < numBins; dist++) {
             let weight = 1.0;
@@ -87,23 +64,26 @@ class GSplatSortBinWeights {
             }
             this.weightByDistance[dist] = weight;
         }
+
+        /** Cached cameraBin from last compute call. */
+        this.lastCameraBin = -1;
+
+        /** Cached bucketCount from last compute call. */
+        this.lastBucketCount = -1;
     }
 
     /**
-     * Computes the camera bin index based on sort mode and distance range.
+     * Computes the camera bin index from the distance range of a linear sort. Only the depth sort
+     * of an orthographic or fisheye camera uses the bins; the other sort keys are spaced by log
+     * distance.
      *
-     * @param {boolean} radialSort - Whether using radial sort mode.
      * @param {number} minDist - Minimum distance.
      * @param {number} range - Distance range (maxDist - minDist).
      * @returns {number} The camera bin index (0 to NUM_BINS-1).
      */
-    static computeCameraBin(radialSort, minDist, range) {
+    static computeCameraBin(minDist, range) {
         const numBins = GSplatSortBinWeights.NUM_BINS;
-        if (radialSort) {
-            // For radial sort with inverted distances, camera (dist=0) maps to the last bin
-            return numBins - 1;
-        }
-        // For linear sort, calculate where camera falls in the projected distance range
+        // calculate where camera falls in the projected distance range
         const cameraOffsetFromRangeStart = -minDist;
         const cameraBinFloat = (cameraOffsetFromRangeStart / range) * numBins;
         return Math.max(0, Math.min(numBins - 1, Math.floor(cameraBinFloat)));

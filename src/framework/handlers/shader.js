@@ -1,6 +1,12 @@
-import { http } from '../../platform/net/http.js';
+import { TextParser } from '../parsers/text.js';
 import { ResourceHandler } from './handler.js';
 
+/**
+ * Resource handler for the `shader` asset type. Loads shader source code as a string. It does not
+ * compile the shader.
+ *
+ * @ignore
+ */
 class ShaderHandler extends ResourceHandler {
     /**
      * TextDecoder for decoding binary data.
@@ -12,26 +18,7 @@ class ShaderHandler extends ResourceHandler {
 
     constructor(app) {
         super(app, 'shader');
-    }
-
-    load(url, callback) {
-        if (typeof url === 'string') {
-            url = {
-                load: url,
-                original: url
-            };
-        }
-
-        http.get(url.load, {
-            retry: this.maxRetries > 0,
-            maxRetries: this.maxRetries
-        }, (err, response) => {
-            if (!err) {
-                callback(null, response);
-            } else {
-                callback(`Error loading shader resource: ${url.original} [${err}]`);
-            }
-        });
+        this.addParser(new TextParser());
     }
 
     /**

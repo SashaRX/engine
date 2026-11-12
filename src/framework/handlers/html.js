@@ -1,6 +1,11 @@
-import { http } from '../../platform/net/http.js';
+import { TextParser } from '../parsers/text.js';
 import { ResourceHandler } from './handler.js';
 
+/**
+ * Resource handler for the `html` asset type. Loads an HTML file as a string.
+ *
+ * @ignore
+ */
 class HtmlHandler extends ResourceHandler {
     /**
      * TextDecoder for decoding binary data.
@@ -12,26 +17,7 @@ class HtmlHandler extends ResourceHandler {
 
     constructor(app) {
         super(app, 'html');
-    }
-
-    load(url, callback) {
-        if (typeof url === 'string') {
-            url = {
-                load: url,
-                original: url
-            };
-        }
-
-        http.get(url.load, {
-            retry: this.maxRetries > 0,
-            maxRetries: this.maxRetries
-        }, (err, response) => {
-            if (!err) {
-                callback(null, response);
-            } else {
-                callback(`Error loading html resource: ${url.original} [${err}]`);
-            }
-        });
+        this.addParser(new TextParser());
     }
 
     /**

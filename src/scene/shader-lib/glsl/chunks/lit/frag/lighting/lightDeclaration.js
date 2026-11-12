@@ -60,6 +60,8 @@ export default /* glsl */`
             uniform vec4 light{i}_cameraParams;
             #if LIGHT{i}TYPE == DIRECTIONAL
                 uniform vec4 light{i}_softShadowParams;
+                // Per-cascade camera parameters, one vec4 per matrix column.
+                uniform mat4 light{i}_shadowCascadeParams;
             #endif
         #endif
 

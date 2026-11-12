@@ -2,14 +2,15 @@ import { Debug } from '../../../core/debug.js';
 import { Vec3 } from '../../../core/math/vec3.js';
 import { BoundingBox } from '../../../core/shape/bounding-box.js';
 import { GSplatDirector } from '../../../scene/gsplat-unified/gsplat-director.js';
-import { Component } from '../component.js';
+import { GSplatParams } from '../../../scene/gsplat-unified/gsplat-params.js';
 import { ComponentSystem } from '../system.js';
 import { GSplatComponent } from './component.js';
-import { GSplatComponentData } from './data.js';
 import { gsplatChunksGLSL } from '../../../scene/shader-lib/glsl/collections/gsplat-chunks-glsl.js';
 import { gsplatChunksWGSL } from '../../../scene/shader-lib/wgsl/collections/gsplat-chunks-wgsl.js';
 import { SHADERLANGUAGE_GLSL, SHADERLANGUAGE_WGSL } from '../../../platform/graphics/constants.js';
 import { ShaderChunks } from '../../../scene/shader-lib/shader-chunks.js';
+import { khrGaussianSplatting } from '../../parsers/glb/extensions/khr-gaussian-splatting.js';
+import { registerGlbResourceExtension, unregisterGlbResourceExtension } from '../../parsers/glb-resource-extension.js';
 
 // Register warning for removed customization chunk
 Debug.call(() => {
@@ -21,38 +22,59 @@ Debug.call(() => {
 /**
  * @import { AppBase } from '../../app-base.js'
  * @import { Camera } from '../../../scene/camera.js'
+ * @import { Entity } from '../../entity.js'
  * @import { Layer } from '../../../scene/layer.js'
+ * @import { ResourceHandler } from '../../handlers/handler.js'
  * @import { ShaderMaterial } from '../../../scene/materials/shader-material.js'
  */
 
-const _schema = [
-    'enabled'
-];
+/**
+ * Options of the `gsplat` component accepted by {@link GSplatComponentSystem} that differ from the
+ * properties of {@link GSplatComponent}. Each replaces the same-named property of the options that
+ * {@link Entity#addComponent} derives from the component class; see
+ * {@link ComponentOptionsOverrides}.
+ *
+ * @typedef {object} GSplatComponentOptionsOverrides
+ * @property {number[]} [aabbCenter] - Center `[x, y, z]` of a custom bounding box; with
+ * `aabbHalfExtents`, sets {@link GSplatComponent#customAabb}.
+ * @property {number[]} [aabbHalfExtents] - Half-extents `[x, y, z]` of a custom bounding box; with
+ * `aabbCenter`, sets {@link GSplatComponent#customAabb}.
+ * @ignore
+ */
 
 // order matters here
 const _properties = [
     'unified',
     'lodBaseDistance',
     'lodMultiplier',
+    'lodRangeMin',
+    'lodRangeMax',
     'castShadows',
     'material',
-    'highQualitySH',
     'asset',
     'resource',
     'layers'
 ];
 
 /**
- * Allows an Entity to render a gsplat.
+ * Manages the {@link GSplatComponent}s of an application. Reach it through `app.systems.gsplat`;
+ * components are created with {@link Entity#addComponent}, never by calling the system directly.
  *
  * @category Graphics
  */
 class GSplatComponentSystem extends ComponentSystem {
     /**
-     * Fired when a GSplat material is created for a camera and layer combination. In unified
-     * mode, materials are created during the first frame update when the GSplat is rendered.
-     * The handler is passed the {@link ShaderMaterial}, the {@link CameraComponent}, and
-     * the {@link Layer}.
+     * Container handler this system registered its glTF extension with.
+     *
+     * @type {ResourceHandler|null}
+     * @private
+     */
+    _containerHandler = null;
+
+    /**
+     * Fired when a GSplat material is created for a camera and layer combination. Materials are
+     * created during the first frame update when the GSplat is rendered. The handler is passed
+     * the {@link ShaderMaterial}, the {@link CameraComponent}, and the {@link Layer}.
      *
      * This event is useful for setting up custom material chunks and parameters before the
      * first render.
@@ -68,7 +90,7 @@ class GSplatComponentSystem extends ComponentSystem {
     static EVENT_MATERIALCREATED = 'material:created';
 
     /**
-     * Fired every frame for each camera and layer combination rendering GSplats in unified mode.
+     * Fired every frame for each camera and layer combination rendering GSplats.
      * The handler is passed the {@link CameraComponent}, the {@link Layer}, a boolean indicating
      * if the current frame has up-to-date sorting, and a number indicating how many resources are
      * loading.
@@ -103,6 +125,29 @@ class GSplatComponentSystem extends ComponentSystem {
     static EVENT_FRAMEREADY = 'frame:ready';
 
     /**
+     * Fired once per frame, after the component/script updates and before rendering, when GSplat
+     * streaming has produced new data that a render would show (newly streamed octree LOD) or a CPU
+     * sort result is ready to be applied. This drives on-demand rendering for apps that run with
+     * {@link AppBase#autoRender} set to false: a typical handler sets {@link AppBase#renderNextFrame}
+     * so the new data is shown.
+     *
+     * Streaming (LOD evaluation, file loading) runs every frame regardless of `autoRender`, so the
+     * scene keeps loading in the background; this event tells you when it's worth rendering.
+     *
+     * Note: this event covers streaming changes only. Changes you make yourself — moving the camera,
+     * modifying the scene, or adding, removing, or changing properties of gsplat components — should
+     * trigger a render yourself.
+     *
+     * @event
+     * @example
+     * app.autoRender = false;
+     * app.systems.gsplat.on('frame:request', () => {
+     *     app.renderNextFrame = true;
+     * });
+     */
+    static EVENT_FRAMEREQUEST = 'frame:request';
+
+    /**
      * Create a new GSplatComponentSystem.
      *
      * @param {AppBase} app - The Application.
@@ -114,17 +159,38 @@ class GSplatComponentSystem extends ComponentSystem {
         this.id = 'gsplat';
 
         this.ComponentType = GSplatComponent;
-        this.DataType = GSplatComponentData;
 
-        this.schema = _schema;
+        // consumed to build customAabb, not settable component properties
+        this.extraDataProperties = ['aabbCenter', 'aabbHalfExtents'];
 
-        app.renderer.gsplatDirector = new GSplatDirector(app.graphicsDevice, app.renderer, app.scene, this);
+        // Resource handlers are created before component systems, so register glTF splat support
+        // here to keep its resource implementation tree-shakeable when this system is omitted.
+        const containerHandler = app.loader.getHandler('container');
+        if (containerHandler && registerGlbResourceExtension(containerHandler, khrGaussianSplatting)) {
+            this._containerHandler = containerHandler;
+        }
+
+        // Own the scene-wide parameters here so apps that omit this system also tree-shake the
+        // GSplat formats, varyings and shader chunks imported by GSplatParams.
+        const gsplatParams = new GSplatParams(app.graphicsDevice);
+        app.scene.setGsplatParams(gsplatParams);
+        app.renderer.gsplatDirector = new GSplatDirector(app.graphicsDevice, app.renderer, app.scene, this, gsplatParams);
 
         // register gsplat shader chunks
         ShaderChunks.get(app.graphicsDevice, SHADERLANGUAGE_GLSL).add(gsplatChunksGLSL);
         ShaderChunks.get(app.graphicsDevice, SHADERLANGUAGE_WGSL).add(gsplatChunksWGSL);
 
-        this.on('beforeremove', this.onRemove, this);
+        this.on('beforeremove', this.onBeforeRemove, this);
+
+        // Drive gsplat streaming (LOD + file loading) every frame, independent of rendering, so it
+        // keeps progressing when app.autoRender is false. 'framerender' fires after the script/anim
+        // updates (current camera) and before the render gate, so a frame:request handler can render
+        // the same frame.
+        this.app.on('framerender', this.onFrameRender, this);
+    }
+
+    onFrameRender() {
+        this.app.renderer.gsplatDirector?.updateStreaming();
     }
 
     initializeComponentData(component, _data, properties) {
@@ -143,7 +209,7 @@ class GSplatComponentSystem extends ComponentSystem {
             component.customAabb = new BoundingBox(new Vec3(_data.aabbCenter), new Vec3(_data.aabbHalfExtents));
         }
 
-        super.initializeComponentData(component, _data, _schema);
+        super.initializeComponentData(component, _data);
     }
 
     cloneComponent(entity, clone) {
@@ -174,16 +240,16 @@ class GSplatComponentSystem extends ComponentSystem {
         return component;
     }
 
-    onRemove(entity, component) {
-        component.onRemove();
+    onBeforeRemove(entity, component) {
+        component.onBeforeRemove();
     }
 
     /**
-     * Gets the GSplat material used by unified GSplat rendering for the given camera and layer.
+     * Gets the GSplat material for the given camera and layer.
      *
-     * Returns null if the material hasn't been created yet. In unified mode, materials are created
-     * during the first frame update when the GSplat is rendered. To be notified immediately when
-     * materials are created, listen to the 'material:created' event on GSplatComponentSystem:
+     * Returns null if the material hasn't been created yet. Materials are created during the first
+     * frame update when the GSplat is rendered. To be notified immediately when materials are
+     * created, listen to the 'material:created' event on GSplatComponentSystem:
      *
      * @param {Camera} camera - The camera instance.
      * @param {Layer} layer - The layer instance.
@@ -209,8 +275,18 @@ class GSplatComponentSystem extends ComponentSystem {
         Debug.deprecated('GSplatComponentSystem#getGSplatMaterial is deprecated. Use GSplatComponentSystem#getMaterial instead.');
         return this.getMaterial(camera, layer);
     }
-}
 
-Component._buildAccessors(GSplatComponent.prototype, _schema);
+    destroy() {
+        super.destroy();
+        this.app.off('framerender', this.onFrameRender, this);
+        this.app.renderer.gsplatDirector?.destroy();
+        this.app.renderer.gsplatDirector = null;
+        this.app.scene.setGsplatParams(null);
+        if (this._containerHandler) {
+            unregisterGlbResourceExtension(this._containerHandler, khrGaussianSplatting.name);
+            this._containerHandler = null;
+        }
+    }
+}
 
 export { GSplatComponentSystem };

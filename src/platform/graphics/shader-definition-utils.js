@@ -18,6 +18,7 @@ import sharedWGSL from './shader-chunks/frag/shared-wgsl.js';
 import halfTypes from './shader-chunks/frag/half-types.js';
 
 /**
+ * @import { TRANSFORM_FEEDBACK_INTERLEAVED, TRANSFORM_FEEDBACK_SEPARATE } from './constants.js'
  * @import { GraphicsDevice } from './graphics-device.js'
  */
 
@@ -58,23 +59,30 @@ class ShaderDefinitionUtils {
      * @param {string[]} [options.feedbackVaryings] - A list of shader output variable
      * names that will be captured when using transform feedback. This setting is only effective
      * if the useTransformFeedback property is enabled.
+     * @param {number} [options.feedbackVaryingsMode] - Specifies how transform feedback varyings
+     * are written into GPU buffers. Use {@link TRANSFORM_FEEDBACK_INTERLEAVED} to pack all captured
+     * varyings into a single buffer, or {@link TRANSFORM_FEEDBACK_SEPARATE} to store each varying
+     * in its own buffer. This setting is only effective when useTransformFeedback property is enabled.
+     * Defaults to {@link TRANSFORM_FEEDBACK_INTERLEAVED}.
      * @param {boolean} [options.useTransformFeedback] - Whether to use transform feedback. Defaults
      * to false.
      * @param {Map<string, string>} [options.vertexIncludes] - A map containing key-value pairs of
      * include names and their content. These are used for resolving #include directives in the
      * vertex shader source.
-     * @param {Map<string, string>} [options.vertexDefines] - A map containing key-value pairs of
-     * define names and their values. These are used for resolving #ifdef style of directives in the
-     * vertex code.
+     * @param {Map<string, string|number|boolean>} [options.vertexDefines] - A map containing
+     * key-value pairs of define names and their values. These are used for resolving #ifdef style
+     * of directives in the vertex code.
      * @param {Map<string, string>} [options.fragmentIncludes] - A map containing key-value pairs
      * of include names and their content. These are used for resolving #include directives in the
      * fragment shader source.
-     * @param {Map<string, string>} [options.fragmentDefines] - A map containing key-value pairs of
-     * define names and their values. These are used for resolving #ifdef style of directives in the
-     * fragment code.
+     * @param {Map<string, string|number|boolean>} [options.fragmentDefines] - A map containing
+     * key-value pairs of define names and their values. These are used for resolving #ifdef style
+     * of directives in the fragment code.
      * @param {string | string[]} [options.fragmentOutputTypes] - Fragment shader output types,
      * which default to vec4. Passing a string will set the output type for all color attachments.
      * Passing an array will set the output type for each color attachment.
+     * @param {boolean} [options.useDualSourceBlending] - Whether the fragment shader outputs a
+     * secondary color for dual-source blending. Defaults to false.
      * @returns {object} Returns the created shader definition.
      */
     static createDefinition(device, options) {
@@ -83,6 +91,8 @@ class ShaderDefinitionUtils {
         Debug.assert(!options.vertexIncludes || options.vertexIncludes instanceof Map);
         Debug.assert(!options.fragmentDefines || options.fragmentDefines instanceof Map);
         Debug.assert(!options.fragmentIncludes || options.fragmentIncludes instanceof Map);
+        Debug.assert(!options.useDualSourceBlending || device.supportsDualSourceBlending,
+            'Dual-source blending is not supported by this graphics device.');
 
         // Normalize fragmentOutputTypes to an array
         const normalizedOutputTypes = (options) => {
@@ -102,6 +112,10 @@ class ShaderDefinitionUtils {
 
             // Define the fragment shader output type, vec4 by default
             if (!isVertex) {
+                if (options.useDualSourceBlending) {
+                    attachmentsDefine += '#define DUAL_SOURCE_BLENDING\n';
+                }
+
                 const fragmentOutputTypes = normalizedOutputTypes(options);
 
                 for (let i = 0; i < device.maxColorAttachments; i++) {
@@ -119,7 +133,11 @@ class ShaderDefinitionUtils {
         const getDefinesWgsl = (isVertex, options) => {
 
             // Enable directives must come before all global declarations
-            let code = ShaderDefinitionUtils.getWGSLEnables(device, isVertex ? 'vertex' : 'fragment');
+            let code = ShaderDefinitionUtils.getWGSLEnables(
+                device,
+                isVertex ? 'vertex' : 'fragment',
+                !isVertex && options.useDualSourceBlending
+            );
 
             // Define the fragment shader output type, vec4 by default
             if (!isVertex) {
@@ -204,9 +222,11 @@ class ShaderDefinitionUtils {
             fincludes: options.fragmentIncludes,
             fshader: fragCode,
             feedbackVaryings: options.feedbackVaryings,
+            feedbackVaryingsMode: options.feedbackVaryingsMode,
             useTransformFeedback: options.useTransformFeedback,
             meshUniformBufferFormat: options.meshUniformBufferFormat,
-            meshBindGroupFormat: options.meshBindGroupFormat
+            meshBindGroupFormat: options.meshBindGroupFormat,
+            useDualSourceBlending: !!options.useDualSourceBlending
         };
     }
 
@@ -216,16 +236,20 @@ class ShaderDefinitionUtils {
      *
      * @param {GraphicsDevice} device - The graphics device.
      * @param {'vertex'|'fragment'|'compute'} shaderType - The type of shader.
+     * @param {boolean} [useDualSourceBlending] - Whether to enable dual-source blending.
      * @returns {string} The WGSL enable directives code.
      * @ignore
      */
-    static getWGSLEnables(device, shaderType) {
+    static getWGSLEnables(device, shaderType, useDualSourceBlending = false) {
         let code = '';
         if (device.supportsShaderF16) {
             code += 'enable f16;\n';
         }
         if (shaderType === 'fragment' && device.supportsPrimitiveIndex) {
             code += 'enable primitive_index;\n';
+        }
+        if (shaderType === 'fragment' && useDualSourceBlending) {
+            code += 'enable dual_source_blending;\n';
         }
         if (device.supportsSubgroups) {
             code += 'enable subgroups;\n';
@@ -236,12 +260,24 @@ class ShaderDefinitionUtils {
         if (shaderType === 'compute' && device.supportsLinearIndexing) {
             code += 'requires linear_indexing;\n';
         }
+        if (device.supportsUnrestrictedPointerParameters) {
+            code += 'requires unrestricted_pointer_parameters;\n';
+        }
+        if (device.supportsPointerCompositeAccess) {
+            code += 'requires pointer_composite_access;\n';
+        }
+        if (device.supportsPacked4x8IntegerDotProduct) {
+            code += 'requires packed_4x8_integer_dot_product;\n';
+        }
+        if (device.supportsTextureAndSamplerLet) {
+            code += 'requires texture_and_sampler_let;\n';
+        }
         return code;
     }
 
     /**
      * @param {GraphicsDevice} device - The graphics device.
-     * @param {Map<string, string>} [defines] - A map containing key-value pairs.
+     * @param {Map<string, string|number|boolean>} [defines] - A map containing key-value pairs.
      * @returns {string} The shader code for the defines.
      * @ignore
      */

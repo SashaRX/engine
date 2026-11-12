@@ -32,6 +32,17 @@ class ShadowRendererLocal {
         this.device = renderer.device;
     }
 
+    // Minimal prerequisite for local shadow-pass creation: ensure the shadow map exists. This is
+    // caster- and camera-independent, so it can run early in the frame (before the frame graph is
+    // built and before mesh culling), mirroring ShadowRendererDirectional#prepareShadowMap, so the
+    // map exists when the frame graph build and the forward pass reference it. Clustered lighting
+    // uses the shadow atlas, so no per-light map is allocated.
+    prepareShadowMap(light) {
+        if (!this.renderer.scene.clusteredLightingEnabled && !light._shadowMap) {
+            light._shadowMap = ShadowMap.create(this.device, light);
+        }
+    }
+
     // cull local shadow map
     cull(light, comp, casters = null) {
 
@@ -41,11 +52,7 @@ class ShadowRendererLocal {
         light.visibleThisFrame = true;
 
         // allocate shadow map unless in clustered lighting mode
-        if (!isClustered) {
-            if (!light._shadowMap) {
-                light._shadowMap = ShadowMap.create(this.device, light);
-            }
-        }
+        this.prepareShadowMap(light);
 
         const type = light._type;
         const faceCount = type === LIGHTTYPE_SPOT ? 1 : 6;
@@ -83,13 +90,24 @@ class ShadowRendererLocal {
                 }
             }
 
-            // cull shadow casters
-            this.renderer.updateCameraFrustum(shadowCam);
-            this.shadowRenderer.cullShadowCasters(comp, light, lightRenderData.visibleCasters, shadowCam, casters);
+            shadowCam.updateFrustum();
+
+            // cull shadow casters - a spot light has a single face and is culled against its
+            // frustum, an omni light is culled against all six faces in a single pass below
+            if (type === LIGHTTYPE_SPOT) {
+                this.shadowRenderer.cullShadowCasters(comp, light, lightRenderData.visibleCasters, shadowCam, casters);
+            }
+        }
+
+        if (type === LIGHTTYPE_OMNI) {
+            this.shadowRenderer.cullShadowCastersOmni(comp, light, casters);
         }
     }
 
     prepareLights(shadowLights, lights) {
+
+        // A previous frame may have been interrupted before the shadow pass cleared this list.
+        shadowLights.length = 0;
 
         let shadowCamera;
         for (let i = 0; i < lights.length; i++) {
@@ -129,7 +147,7 @@ class ShadowRendererLocal {
                 const faceCount = light.numShadowFaces;
                 for (let face = 0; face < faceCount; face++) {
                     const renderPass = new RenderPassShadowLocalNonClustered(this.device, this.shadowRenderer, light, face, applyVsm);
-                    frameGraph.addRenderPass(renderPass);
+                    frameGraph.addPass(renderPass);
                 }
             }
         }

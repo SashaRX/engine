@@ -10,37 +10,30 @@ import { Vec3 } from './vec3.js';
  * rotations in 3D applications, offering advantages over Euler angles including no gimbal lock and
  * more efficient interpolation.
  *
+ * A new Quat is the identity rotation. Build a rotation with {@link setFromEulerAngles},
+ * {@link setFromAxisAngle}, {@link setFromDirections} or {@link setFromMat4}, and read one back
+ * with {@link getEulerAngles} or {@link getAxisAngle}. Angles are in degrees throughout. Rotations
+ * combine by multiplication: `a.mul(b)` and `r.mul2(a, b)` both compute `a * b`, the same product
+ * {@link Mat4} uses, and {@link transformVector} applies a rotation to a {@link Vec3}. Interpolate
+ * with {@link slerp} for constant angular speed, or with the cheaper {@link lerp} when the two
+ * rotations are close together.
+ *
+ * Methods modify the quaternion they are called on and return it for chaining. Use {@link clone}
+ * for an independent copy and {@link copy} to overwrite. The static constants {@link IDENTITY} and
+ * {@link ZERO} are frozen shared instances, and the quaternion returned by
+ * {@link GraphNode#getRotation} is internal storage to be treated as read-only.
+ *
+ * @example
+ * // Rotate an entity 90 degrees about the world Y axis
+ * const rotation = new Quat().setFromAxisAngle(Vec3.UP, 90);
+ * entity.setRotation(rotation);
+ * @example
+ * // Turn smoothly towards a target orientation each frame
+ * const smoothed = new Quat().slerp(entity.getRotation(), targetRotation, 0.1);
+ * entity.setRotation(smoothed);
  * @category Math
  */
 class Quat {
-    /**
-     * The x component of the quaternion.
-     *
-     * @type {number}
-     */
-    x;
-
-    /**
-     * The y component of the quaternion.
-     *
-     * @type {number}
-     */
-    y;
-
-    /**
-     * The z component of the quaternion.
-     *
-     * @type {number}
-     */
-    z;
-
-    /**
-     * The w component of the quaternion.
-     *
-     * @type {number}
-     */
-    w;
-
     /**
      * Creates a new Quat instance.
      *
@@ -50,8 +43,8 @@ class Quat {
      * @param {number} [z] - The z value. Defaults to 0.
      * @param {number} [w] - The w value. Defaults to 1.
      * @example
-     * const q1 = new pc.Quat(); // defaults to 0, 0, 0, 1
-     * const q2 = new pc.Quat(1, 2, 3, 4);
+     * const q1 = new Quat(); // defaults to 0, 0, 0, 1
+     * const q2 = new Quat(1, 2, 3, 4);
      */
     /**
      * Creates a new Quat instance.
@@ -59,7 +52,7 @@ class Quat {
      * @overload
      * @param {number[]} arr - The array to set the quaternion values from.
      * @example
-     * const q = new pc.Quat([1, 2, 3, 4]);
+     * const q = new Quat([1, 2, 3, 4]);
      */
     /**
      * @param {number|number[]} [x] - The x value. Defaults to 0. If x is an array of length 4, the
@@ -70,16 +63,43 @@ class Quat {
      */
     constructor(x = 0, y = 0, z = 0, w = 1) {
         if (x.length === 4) {
-            this.x = x[0];
-            this.y = x[1];
-            this.z = x[2];
-            this.w = x[3];
-        } else {
-            this.x = x;
-            this.y = y;
-            this.z = z;
-            this.w = w;
+            w = x[3];
+            z = x[2];
+            y = x[1];
+            x = x[0];
         }
+
+        // Fields are assigned once here instead of declared as class fields. A declaration without
+        // an initializer stores undefined first, so V8 never unboxes the field as a double and
+        // every fractional write allocates a heap number.
+
+        /**
+         * The x component of the quaternion.
+         *
+         * @type {number}
+         */
+        this.x = x;
+
+        /**
+         * The y component of the quaternion.
+         *
+         * @type {number}
+         */
+        this.y = y;
+
+        /**
+         * The z component of the quaternion.
+         *
+         * @type {number}
+         */
+        this.z = z;
+
+        /**
+         * The w component of the quaternion.
+         *
+         * @type {number}
+         */
+        this.w = w;
     }
 
     /**
@@ -87,7 +107,7 @@ class Quat {
      *
      * @returns {this} A new quaternion identical to this one.
      * @example
-     * const q = new pc.Quat(-0.11, -0.15, -0.46, 0.87);
+     * const q = new Quat(-0.11, -0.15, -0.46, 0.87);
      * const qclone = q.clone();
      *
      * console.log("The result of the cloning is: " + qclone.toString());
@@ -104,7 +124,7 @@ class Quat {
      * @param {Quat} [src] - The quaternion to conjugate. If not set, the operation is done in place.
      * @returns {Quat} Self for chaining.
      * @example
-     * const q = new pc.Quat(1, 2, 3, 4);
+     * const q = new Quat(1, 2, 3, 4);
      * q.conjugate();
      * // q is now [-1, -2, -3, 4]
      * @ignore
@@ -124,8 +144,8 @@ class Quat {
      * @param {Quat} rhs - The quaternion to be copied.
      * @returns {Quat} Self for chaining.
      * @example
-     * const src = new pc.Quat();
-     * const dst = new pc.Quat();
+     * const src = new Quat();
+     * const dst = new Quat();
      * dst.copy(src);
      * console.log("The two quaternions are " + (src.equals(dst) ? "equal" : "different"));
      */
@@ -144,8 +164,8 @@ class Quat {
      * @param {Quat} other - The quaternion to calculate the dot product with.
      * @returns {number} The dot product of the two quaternions.
      * @example
-     * const a = new pc.Quat(1, 0, 0, 0);
-     * const b = new pc.Quat(0, 1, 0, 0);
+     * const a = new Quat(1, 0, 0, 0);
+     * const b = new Quat(0, 1, 0, 0);
      * console.log("Dot product: " + a.dot(b)); // Outputs 0
      */
     dot(other) {
@@ -158,8 +178,8 @@ class Quat {
      * @param {Quat} rhs - The quaternion to be compared against.
      * @returns {boolean} True if the quaternions are equal and false otherwise.
      * @example
-     * const a = new pc.Quat();
-     * const b = new pc.Quat();
+     * const a = new Quat();
+     * const b = new Quat();
      * console.log("The two quaternions are " + (a.equals(b) ? "equal" : "different"));
      */
     equals(rhs) {
@@ -174,8 +194,8 @@ class Quat {
      * quaternions. Defaults to 1e-6.
      * @returns {boolean} True if the quaternions are equal and false otherwise.
      * @example
-     * const a = new pc.Quat();
-     * const b = new pc.Quat();
+     * const a = new Quat();
+     * const b = new Quat();
      * console.log("The two quaternions are approximately " + (a.equalsApprox(b, 1e-9) ? "equal" : "different"));
      */
     equalsApprox(rhs, epsilon = 1e-6) {
@@ -193,9 +213,9 @@ class Quat {
      * @param {Vec3} axis - The 3-dimensional vector to receive the axis of rotation.
      * @returns {number} Angle, in degrees, of the rotation.
      * @example
-     * const q = new pc.Quat();
-     * q.setFromAxisAngle(new pc.Vec3(0, 1, 0), 90);
-     * const v = new pc.Vec3();
+     * const q = new Quat();
+     * q.setFromAxisAngle(new Vec3(0, 1, 0), 90);
+     * const v = new Vec3();
      * const angle = q.getAxisAngle(v);
      * // Outputs 90
      * console.log(angle);
@@ -237,9 +257,9 @@ class Quat {
      * @returns {Vec3} The 3-dimensional vector holding the Euler angles in degrees. This will be
      * the same object passed in as the `eulers` parameter (if one was provided).
      * @example
-     * const q = new pc.Quat();
-     * q.setFromAxisAngle(pc.Vec3.UP, 90);
-     * const e = new pc.Vec3();
+     * const q = new Quat();
+     * q.setFromAxisAngle(Vec3.UP, 90);
+     * const e = new Vec3();
      * q.getEulerAngles(e);
      * // Outputs [0, 90, 0]
      * console.log(e.toString());
@@ -278,7 +298,7 @@ class Quat {
      * @returns {Quat} Self for chaining.
      * @example
      * // Create a quaternion rotated 180 degrees around the y-axis
-     * const rot = new pc.Quat().setFromEulerAngles(0, 180, 0);
+     * const rot = new Quat().setFromEulerAngles(0, 180, 0);
      *
      * // Invert in place
      * rot.invert();
@@ -292,7 +312,7 @@ class Quat {
      *
      * @returns {number} The magnitude of the specified quaternion.
      * @example
-     * const q = new pc.Quat(0, 0, 0, 5);
+     * const q = new Quat(0, 0, 0, 5);
      * const len = q.length();
      * // Outputs 5
      * console.log("The length of the quaternion is: " + len);
@@ -306,7 +326,7 @@ class Quat {
      *
      * @returns {number} The magnitude squared of the quaternion.
      * @example
-     * const q = new pc.Quat(3, 4, 0, 0);
+     * const q = new Quat(3, 4, 0, 0);
      * const lenSq = q.lengthSq();
      * // Outputs 25
      * console.log("The length squared of the quaternion is: " + lenSq);
@@ -322,15 +342,14 @@ class Quat {
      *
      * @param {Quat} lhs - The quaternion to interpolate from.
      * @param {Quat} rhs - The quaternion to interpolate to.
-     * @param {number} alpha - The value controlling the interpolation in relation to the two input
-     * quaternions. The value is in the range 0 to 1, 0 generating q1, 1 generating q2 and anything
-     * in between generating a linear interpolation between the two.
+     * @param {number} alpha - The unclamped interpolation factor. Values between 0 and 1 interpolate
+     * between lhs and rhs; values outside this range extrapolate beyond them.
      * @returns {Quat} Self for chaining.
      * @example
-     * const q1 = new pc.Quat(-0.11, -0.15, -0.46, 0.87);
-     * const q2 = new pc.Quat(-0.21, -0.21, -0.67, 0.68);
+     * const q1 = new Quat(-0.11, -0.15, -0.46, 0.87);
+     * const q2 = new Quat(-0.21, -0.21, -0.67, 0.68);
      *
-     * const result = new pc.Quat();
+     * const result = new Quat();
      * result.lerp(q1, q2, 0);   // Return q1
      * result.lerp(q1, q2, 0.5); // Return the midpoint interpolant
      * result.lerp(q1, q2, 1);   // Return q2
@@ -350,8 +369,8 @@ class Quat {
      * @param {Quat} rhs - The quaternion used as the second multiplicand of the operation.
      * @returns {Quat} Self for chaining.
      * @example
-     * const a = new pc.Quat().setFromEulerAngles(0, 30, 0);
-     * const b = new pc.Quat().setFromEulerAngles(0, 60, 0);
+     * const a = new Quat().setFromEulerAngles(0, 30, 0);
+     * const b = new Quat().setFromEulerAngles(0, 60, 0);
      *
      * // a becomes a 90 degree rotation around the Y axis
      * // In other words, a = a * b
@@ -385,7 +404,7 @@ class Quat {
      * @param {Quat} [src] - The quaternion to scale. If not set, the operation is done in place.
      * @returns {Quat} Self for chaining.
      * @example
-     * const q = new pc.Quat(1, 2, 3, 4);
+     * const q = new Quat(1, 2, 3, 4);
      * q.mulScalar(2);
      * // q is now [2, 4, 6, 8]
      */
@@ -404,9 +423,9 @@ class Quat {
      * @param {Quat} rhs - The quaternion used as the second multiplicand of the operation.
      * @returns {Quat} Self for chaining.
      * @example
-     * const a = new pc.Quat().setFromEulerAngles(0, 30, 0);
-     * const b = new pc.Quat().setFromEulerAngles(0, 60, 0);
-     * const r = new pc.Quat();
+     * const a = new Quat().setFromEulerAngles(0, 30, 0);
+     * const b = new Quat().setFromEulerAngles(0, 60, 0);
+     * const r = new Quat();
      *
      * // r is set to a 90 degree rotation around the Y axis
      * // In other words, r = a * b
@@ -437,7 +456,7 @@ class Quat {
      * @param {Quat} [src] - The quaternion to normalize. If not set, the operation is done in place.
      * @returns {Quat} Self for chaining.
      * @example
-     * const v = new pc.Quat(0, 0, 0, 5);
+     * const v = new Quat(0, 0, 0, 5);
      * v.normalize();
      * // Outputs [0, 0, 0, 1]
      * console.log(v.toString());
@@ -467,7 +486,7 @@ class Quat {
      * @param {number} w - The w component of the quaternion.
      * @returns {Quat} Self for chaining.
      * @example
-     * const q = new pc.Quat();
+     * const q = new Quat();
      * q.set(1, 0, 0, 0);
      *
      * // Outputs 1, 0, 0, 0
@@ -489,8 +508,8 @@ class Quat {
      * @param {number} angle - Angle to rotate around the given axis in degrees.
      * @returns {Quat} Self for chaining.
      * @example
-     * const q = new pc.Quat();
-     * q.setFromAxisAngle(pc.Vec3.UP, 90);
+     * const q = new Quat();
+     * q.setFromAxisAngle(Vec3.UP, 90);
      */
     setFromAxisAngle(axis, angle) {
         angle *= 0.5 * math.DEG_TO_RAD;
@@ -522,13 +541,13 @@ class Quat {
      * specified XYZ Euler angles. Allows for method chaining.
      * @example
      * // Create a quaternion from 3 individual Euler angles (interpreted as X, Y, Z order)
-     * const q1 = new pc.Quat();
+     * const q1 = new Quat();
      * q1.setFromEulerAngles(45, 90, 180); // 45 deg around X, then 90 deg around Y', then 180 deg around Z''
      * console.log("From numbers:", q1.toString());
      * @example
      * // Create the same quaternion from a Vec3 containing the angles (X, Y, Z)
-     * const anglesVec = new pc.Vec3(45, 90, 180);
-     * const q2 = new pc.Quat();
+     * const anglesVec = new Vec3(45, 90, 180);
+     * const q2 = new Quat();
      * q2.setFromEulerAngles(anglesVec);
      * console.log("From Vec3:", q2.toString()); // Should match q1
      */
@@ -568,10 +587,10 @@ class Quat {
      * @returns {Quat} Self for chaining.
      * @example
      * // Create a 4x4 rotation matrix of 180 degrees around the y-axis
-     * const rot = new pc.Mat4().setFromAxisAngle(pc.Vec3.UP, 180);
+     * const rot = new Mat4().setFromAxisAngle(Vec3.UP, 180);
      *
      * // Convert to a quaternion
-     * const q = new pc.Quat().setFromMat4(rot);
+     * const q = new Quat().setFromMat4(rot);
      */
     setFromMat4(m) {
         const d = m.data;
@@ -650,9 +669,9 @@ class Quat {
      * @param {Vec3} to - The direction to rotate to. It should be normalized.
      * @returns {Quat} Self for chaining.
      * @example
-     * const q = new pc.Quat();
-     * const from = new pc.Vec3(0, 0, 1);
-     * const to = new pc.Vec3(0, 1, 0);
+     * const q = new Quat();
+     * const from = new Vec3(0, 0, 1);
+     * const to = new Vec3(0, 1, 0);
      * q.setFromDirections(from, to);
      */
     setFromDirections(from, to) {
@@ -689,15 +708,14 @@ class Quat {
      *
      * @param {Quat} lhs - The quaternion to interpolate from.
      * @param {Quat} rhs - The quaternion to interpolate to.
-     * @param {number} alpha - The value controlling the interpolation in relation to the two input
-     * quaternions. The value is in the range 0 to 1, 0 generating q1, 1 generating q2 and anything
-     * in between generating a spherical interpolation between the two.
+     * @param {number} alpha - The unclamped interpolation factor. Values between 0 and 1 interpolate
+     * between lhs and rhs; values outside this range extrapolate beyond them.
      * @returns {Quat} Self for chaining.
      * @example
-     * const q1 = new pc.Quat(-0.11, -0.15, -0.46, 0.87);
-     * const q2 = new pc.Quat(-0.21, -0.21, -0.67, 0.68);
+     * const q1 = new Quat(-0.11, -0.15, -0.46, 0.87);
+     * const q2 = new Quat(-0.21, -0.21, -0.67, 0.68);
      *
-     * const result = new pc.Quat();
+     * const result = new Quat();
      * result.slerp(q1, q2, 0);   // Return q1
      * result.slerp(q1, q2, 0.5); // Return the midpoint interpolant
      * result.slerp(q1, q2, 1);   // Return q2
@@ -767,10 +785,10 @@ class Quat {
      * @returns {Vec3} The transformed vector (res if specified, otherwise a new Vec3).
      * @example
      * // Create a 3-dimensional vector
-     * const v = new pc.Vec3(1, 2, 3);
+     * const v = new Vec3(1, 2, 3);
      *
      * // Create a quaternion rotation
-     * const q = new pc.Quat().setFromEulerAngles(10, 20, 30);
+     * const q = new Quat().setFromEulerAngles(10, 20, 30);
      *
      * const tv = q.transformVector(v);
      */
@@ -800,7 +818,7 @@ class Quat {
      * array. Default is 0.
      * @returns {Quat} Self for chaining.
      * @example
-     * const q = new pc.Quat();
+     * const q = new Quat();
      * q.fromArray([20, 10, 5, 0]);
      * // q is set to [20, 10, 5, 0]
      */
@@ -818,7 +836,7 @@ class Quat {
      *
      * @returns {string} The quaternion in string form.
      * @example
-     * const q = new pc.Quat(0, 0, 0, 1);
+     * const q = new Quat(0, 0, 0, 1);
      * // Outputs [0, 0, 0, 1]
      * console.log(q.toString());
      */
@@ -851,7 +869,7 @@ class Quat {
      * array. Default is 0.
      * @returns {number[]|ArrayBufferView} The quaternion as an array.
      * @example
-     * const q = new pc.Quat(20, 10, 5, 1);
+     * const q = new Quat(20, 10, 5, 1);
      * // Outputs [20, 10, 5, 1]
      * console.log(q.toArray());
      */

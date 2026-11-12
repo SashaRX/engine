@@ -1,4 +1,3 @@
-import { Debug } from '../debug.js';
 import { Vec3 } from '../math/vec3.js';
 
 /**
@@ -11,6 +10,18 @@ const tmpVecB = new Vec3();
 /**
  * A bounding sphere is a volume for facilitating fast intersection testing.
  *
+ * A sphere is a {@link center} and a {@link radius}. It is the cheapest bounding volume to test, so
+ * it suits broad-phase checks made before a finer test. {@link containsPoint},
+ * {@link intersectsBoundingSphere} and {@link intersectsRay} return a boolean and allocate nothing.
+ * Like {@link BoundingBox}, the constructor copies the center vector it is given, so later changes
+ * to that vector do not affect the sphere.
+ *
+ * @example
+ * // A trigger volume 2 units around an entity
+ * const sphere = new BoundingSphere(entity.getPosition(), 2);
+ * if (sphere.containsPoint(player.getPosition())) {
+ *     // the player is within 2 units of the entity
+ * }
  * @category Math
  */
 class BoundingSphere {
@@ -23,26 +34,26 @@ class BoundingSphere {
     center;
 
     /**
-     * The radius of the bounding sphere.
-     *
-     * @type {number}
-     */
-    radius;
-
-    /**
      * Creates a new BoundingSphere instance.
      *
      * @param {Vec3} [center] - The world space coordinate marking the center of the sphere. The
-     * constructor takes a reference of this parameter.
+     * constructor copies this parameter. Defaults to (0, 0, 0).
      * @param {number} [radius] - The radius of the bounding sphere. Defaults to 0.5.
      * @example
      * // Create a new bounding sphere centered on the origin with a radius of 0.5
-     * const sphere = new pc.BoundingSphere();
+     * const sphere = new BoundingSphere();
      */
-    constructor(center = new Vec3(), radius = 0.5) {
-        Debug.assert(!Object.isFrozen(center), 'The constructor of \'BoundingSphere\' does not accept a constant (frozen) object as a \'center\' parameter');
+    constructor(center, radius = 0.5) {
+        this.center = center ? center.clone() : new Vec3();
 
-        this.center = center;
+        // Assigned here instead of declared as a class field, so V8 can store it as an unboxed
+        // double (see Vec3).
+
+        /**
+         * The radius of the bounding sphere.
+         *
+         * @type {number}
+         */
         this.radius = radius;
     }
 
@@ -52,8 +63,8 @@ class BoundingSphere {
      * @param {Vec3} point - Point to test.
      * @returns {boolean} True if the point is inside the sphere and false otherwise.
      * @example
-     * const sphere = new pc.BoundingSphere(new pc.Vec3(0, 0, 0), 1);
-     * const point = new pc.Vec3(0.5, 0, 0);
+     * const sphere = new BoundingSphere(new Vec3(0, 0, 0), 1);
+     * const point = new Vec3(0.5, 0, 0);
      * const isInside = sphere.containsPoint(point); // true
      */
     containsPoint(point) {
@@ -63,11 +74,12 @@ class BoundingSphere {
     }
 
     /**
-     * Test if a ray intersects with the sphere.
+     * Test if a ray intersects with the sphere. A ray that starts inside the sphere intersects it.
      *
      * @param {Ray} ray - Ray to test against (direction must be normalized).
      * @param {Vec3} [point] - If there is an intersection, the intersection point will be copied
-     * into here.
+     * into here. For a ray that starts inside the sphere, this is the point where the ray leaves
+     * it.
      * @returns {boolean} True if there is an intersection.
      */
     intersectsRay(ray, point) {
@@ -86,10 +98,12 @@ class BoundingSphere {
             return false;
         }
 
-        // ray intersects sphere, compute smallest t value of intersection
-        const t = Math.abs(-b - Math.sqrt(discr));
+        // ray intersects sphere; a negative entry distance means the ray starts inside the
+        // sphere, so use the exit distance instead
+        const sqrtDiscr = Math.sqrt(discr);
+        const tEnter = -b - sqrtDiscr;
+        const t = tEnter >= 0 ? tEnter : -b + sqrtDiscr;
 
-        // if t is negative, ray started inside sphere so clamp t to zero
         if (point) {
             point.copy(ray.direction).mulScalar(t).add(ray.origin);
         }

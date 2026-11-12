@@ -1,4 +1,3 @@
-import { platform } from '../../core/platform.js';
 import { EventHandler } from '../../core/event-handler.js';
 
 import { isMousePointerLocked, MouseEvent } from './mouse-event.js';
@@ -15,12 +14,24 @@ import { isMousePointerLocked, MouseEvent } from './mouse-event.js';
  *
  * Allows the state of mouse buttons to be queried to check if they are currently pressed or were
  * pressed/released since the last update. Provides methods to enable/disable pointer lock for
- * raw mouse movement input and control over the context menu. The Mouse instance must be attached
- * to a DOM element before it can detect mouse events.
+ * raw mouse movement input and control over the context menu. The class automatically clears
+ * button states when the window loses focus or the document becomes hidden, without firing
+ * `mouseup` events. The Mouse instance must be attached to a DOM element before it can detect
+ * mouse events.
+ *
+ * The first unlocked mouse movement after creation, detachment or focus loss establishes a new
+ * position and reports zero movement delta. Movement outside the target also invalidates the
+ * position, so re-entry reports zero delta. Pointer-locked movement uses the browser's relative
+ * movement deltas.
  *
  * Your application's Mouse instance is managed and accessible via {@link AppBase#mouse}.
  *
- * @category Input
+ * For pointer-lock-aware, frame-accumulated input deltas rather than raw events, see
+ * {@link KeyboardMouseSource}, {@link GamepadSource} and {@link MultiTouchSource}, which feed
+ * {@link InputController}s such as {@link OrbitController}, {@link FlyController} and
+ * {@link FocusController}.
+ *
+ * @category Input Devices
  */
 class Mouse extends EventHandler {
     /**
@@ -74,6 +85,9 @@ class Mouse extends EventHandler {
     _lastY = 0;
 
     /** @private */
+    _lastPositionValid = false;
+
+    /** @private */
     _buttons = [false, false, false];
 
     /** @private */
@@ -116,6 +130,18 @@ class Mouse extends EventHandler {
     _contextMenuHandler;
 
     /**
+     * @type {() => void}
+     * @private
+     */
+    _visibilityChangeHandler;
+
+    /**
+     * @type {() => void}
+     * @private
+     */
+    _windowBlurHandler;
+
+    /**
      * Create a new Mouse instance.
      *
      * @param {Element} [element] - The Element that the mouse events are attached to.
@@ -128,6 +154,8 @@ class Mouse extends EventHandler {
         this._downHandler = this._handleDown.bind(this);
         this._moveHandler = this._handleMove.bind(this);
         this._wheelHandler = this._handleWheel.bind(this);
+        this._visibilityChangeHandler = this._handleVisibilityChange.bind(this);
+        this._windowBlurHandler = this._handleWindowBlur.bind(this);
         this._contextMenuHandler = (event) => {
             event.preventDefault();
         };
@@ -145,7 +173,8 @@ class Mouse extends EventHandler {
     }
 
     /**
-     * Attach mouse events to an Element.
+     * Attach mouse events to an Element. If already attached, this changes the target element
+     * while preserving current and previous button states, unlike {@link Keyboard#attach}.
      *
      * @param {Element} element - The DOM element to attach the mouse to.
      */
@@ -156,16 +185,19 @@ class Mouse extends EventHandler {
         this._attached = true;
 
         /** @type {AddEventListenerOptions} */
-        const passiveOptions = { passive: false };
-        const options = platform.passiveEvents ? passiveOptions : false;
+        const options = { passive: false };
         window.addEventListener('mouseup', this._upHandler, options);
         window.addEventListener('mousedown', this._downHandler, options);
         window.addEventListener('mousemove', this._moveHandler, options);
         window.addEventListener('wheel', this._wheelHandler, options);
+        document.addEventListener('visibilitychange', this._visibilityChangeHandler, false);
+        window.addEventListener('blur', this._windowBlurHandler, false);
     }
 
     /**
-     * Remove mouse events from the element that it is attached to.
+     * Remove mouse events from the element that it is attached to and clear current and previous
+     * button states. The previous mouse position is also invalidated so the next unlocked movement
+     * reports zero delta. This does not fire `mouseup` events.
      */
     detach() {
         if (!this._attached) return;
@@ -173,12 +205,15 @@ class Mouse extends EventHandler {
         this._target = null;
 
         /** @type {AddEventListenerOptions} */
-        const passiveOptions = { passive: false };
-        const options = platform.passiveEvents ? passiveOptions : false;
+        const options = { passive: false };
         window.removeEventListener('mouseup', this._upHandler, options);
         window.removeEventListener('mousedown', this._downHandler, options);
         window.removeEventListener('mousemove', this._moveHandler, options);
         window.removeEventListener('wheel', this._wheelHandler, options);
+        document.removeEventListener('visibilitychange', this._visibilityChangeHandler, false);
+        window.removeEventListener('blur', this._windowBlurHandler, false);
+
+        this._handleWindowBlur();
     }
 
     /**
@@ -317,6 +352,28 @@ class Mouse extends EventHandler {
         return (!this._buttons[button] && this._lastbuttons[button]);
     }
 
+    /**
+     * Handle the browser visibilitychange event.
+     *
+     * @private
+     */
+    _handleVisibilityChange() {
+        if (document.visibilityState === 'hidden') {
+            this._handleWindowBlur();
+        }
+    }
+
+    /**
+     * Handle the browser blur event.
+     *
+     * @private
+     */
+    _handleWindowBlur() {
+        this._buttons.fill(false);
+        this._lastbuttons.fill(false);
+        this._lastPositionValid = false;
+    }
+
     _handleUp(event) {
         // disable released button
         this._buttons[event.button] = false;
@@ -340,13 +397,18 @@ class Mouse extends EventHandler {
 
     _handleMove(event) {
         const e = new MouseEvent(this, event);
-        if (!e.event) return;
+        if (!e.event) {
+            // Filtered movement outside the target must not leave a stale baseline for re-entry.
+            this._lastPositionValid = false;
+            return;
+        }
 
-        this.fire('mousemove', e);
-
-        // Store the last offset position to calculate deltas
+        // Update before firing so a callback that loses focus or detaches can invalidate the baseline.
         this._lastX = e.x;
         this._lastY = e.y;
+        this._lastPositionValid = !isMousePointerLocked();
+
+        this.fire('mousemove', e);
     }
 
     _handleWheel(event) {

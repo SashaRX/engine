@@ -87,6 +87,43 @@ describe('Curve', function () {
 
     });
 
+    describe('#remove', function () {
+
+        it('removes and returns the key at the given index', function () {
+            const c = new Curve([0, 0, 0.5, 1, 1, 2]);
+            const removed = c.remove(1);
+            expect(removed).to.deep.equal([0.5, 1]);
+            expect(c.length).to.equal(2);
+            expect(c.get(0)).to.deep.equal([0, 0]);
+            expect(c.get(1)).to.deep.equal([1, 2]);
+        });
+
+        it('returns null when the index is out of range', function () {
+            const c = new Curve([0, 0, 1, 2]);
+            expect(c.remove(2)).to.equal(null);
+            expect(c.remove(-1)).to.equal(null);
+            expect(c.length).to.equal(2);
+        });
+
+    });
+
+    describe('#clear', function () {
+
+        it('removes all keys from the curve', function () {
+            const c = new Curve([0, 0, 0.5, 1, 1, 2]);
+            const result = c.clear();
+            expect(c.length).to.equal(0);
+            expect(result).to.equal(c);
+        });
+
+        it('is a no-op on an empty curve', function () {
+            const c = new Curve();
+            c.clear();
+            expect(c.length).to.equal(0);
+        });
+
+    });
+
     describe('#clone', function () {
 
         it('clones an empty curve', function () {
@@ -118,6 +155,57 @@ describe('Curve', function () {
             const a = new UserCurve();
             const b = a.clone();
             expect(b).to.be.an.instanceof(UserCurve);
+        });
+
+    });
+
+    describe('#closest', function () {
+
+        it('returns the key closest to the specified time', function () {
+            const c = new Curve([0, 1, 0.5, 2, 1, 3]);
+            expect(c.closest(0.6)).to.deep.equal([0.5, 2]);
+            expect(c.closest(0.2)).to.deep.equal([0, 1]);
+            expect(c.closest(0.9)).to.deep.equal([1, 3]);
+        });
+
+        it('finds the nearest key outside the usual 0-to-1 range', function () {
+            const c = new Curve([0, 0, 10, 1]);
+            expect(c.closest(5.5)).to.deep.equal([10, 1]);
+            expect(c.closest(9)).to.deep.equal([10, 1]);
+            expect(c.closest(-5)).to.deep.equal([0, 0]);
+        });
+
+        it('finds the closest key however far apart the keys are', function () {
+            const c = new Curve([0, 0, 1e6, 1, 2e6, 2]);
+            expect(c.closest(2e5)).to.deep.equal([0, 0]);
+            expect(c.closest(1.2e6)).to.deep.equal([1e6, 1]);
+            expect(c.closest(1.9e6)).to.deep.equal([2e6, 2]);
+        });
+
+        it('returns the first or last key for times beyond the curve', function () {
+            const c = new Curve([0, 0, 1, 1, 2, 2]);
+            expect(c.closest(-1e6)).to.deep.equal([0, 0]);
+            expect(c.closest(1e6)).to.deep.equal([2, 2]);
+            expect(c.closest(-Infinity)).to.deep.equal([0, 0]);
+            expect(c.closest(Infinity)).to.deep.equal([2, 2]);
+
+            // far enough away that every key rounds to the same distance
+            expect(c.closest(-1e17)).to.deep.equal([0, 0]);
+        });
+
+        it('returns the later key when two keys are equally close', function () {
+            expect(new Curve([0, 0, 1, 1]).closest(0.5)).to.deep.equal([1, 1]);
+
+            // keys that share a time are equally close to any time
+            const c = new Curve([0, 1, 0, 2, 1, 3]);
+            expect(c.closest(0)).to.deep.equal([0, 2]);
+            expect(c.closest(-1)).to.deep.equal([0, 2]);
+            expect(c.closest(-Infinity)).to.deep.equal([0, 2]);
+        });
+
+        it('returns null for a curve with no keys', function () {
+            const c = new Curve();
+            expect(c.closest(5)).to.equal(null);
         });
 
     });

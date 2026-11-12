@@ -261,6 +261,21 @@ class Morph extends RefCountedObject {
         return this._targets;
     }
 
+    // ---- deprecated block start ----
+
+    /**
+     * @deprecated Use Morph#targets instead.
+     * @param {number} index - The index of the morph target.
+     * @returns {MorphTarget} The morph target at the given index.
+     * @ignore
+     */
+    getTarget(index) {
+        Debug.deprecated('Morph#getTarget is deprecated. Use Morph#targets instead.');
+        return this.targets[index];
+    }
+
+    // ---- deprecated block end ----
+
     _updateMorphFlags() {
 
         // find out if this morph needs to morph positions and normals
@@ -283,8 +298,8 @@ class Morph extends RefCountedObject {
      *
      * @param {string} name - The name of the texture.
      * @param {number} format - The format of the texture.
-     * @param {Array} [levels] - The levels of the texture.
      * @param {number} [arrayLength] - The length of the texture array.
+     * @param {Array} [levels] - The levels of the texture.
      * @returns {Texture} The created texture.
      * @private
      */

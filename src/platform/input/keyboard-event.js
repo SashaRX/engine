@@ -9,7 +9,7 @@
  * - {@link Keyboard.EVENT_KEYDOWN}
  * - {@link Keyboard.EVENT_KEYUP}
  *
- * @category Input
+ * @category Input Devices
  */
 class KeyboardEvent {
     /**
@@ -36,11 +36,11 @@ class KeyboardEvent {
     /**
      * Create a new KeyboardEvent.
      *
-     * @param {Keyboard} keyboard - The keyboard object which is firing the event.
-     * @param {globalThis.KeyboardEvent} event - The original browser event that was fired.
+     * @param {Keyboard} [keyboard] - The keyboard object which is firing the event.
+     * @param {globalThis.KeyboardEvent} [event] - The original browser event that was fired.
      * @example
      * const onKeyDown = function (e) {
-     *     if (e.key === pc.KEY_SPACE) {
+     *     if (e.key === KEY_SPACE) {
      *         // space key pressed
      *     }
      *     e.event.preventDefault(); // Use original browser event to prevent browser action.

@@ -92,12 +92,15 @@ export { createGraphicsDevice } from './platform/graphics/graphics-device-create
 export { BindGroupFormat, BindUniformBufferFormat, BindTextureFormat, BindStorageTextureFormat, BindStorageBufferFormat } from './platform/graphics/bind-group-format.js';
 export { BlendState } from './platform/graphics/blend-state.js';
 export { Compute } from './platform/graphics/compute.js';
+export { ComputePass } from './platform/graphics/compute-pass.js';
 export { DepthState } from './platform/graphics/depth-state.js';
 export { DrawCommands } from './platform/graphics/draw-commands.js';
 export { GraphicsDevice } from './platform/graphics/graphics-device.js';
 export { IndexBuffer } from './platform/graphics/index-buffer.js';
 export { RenderTarget } from './platform/graphics/render-target.js';
 export { RenderPass } from './platform/graphics/render-pass.js';
+export { SceneColorMapHandle } from './platform/graphics/scene-color-map-handle.js';
+export { SceneDepthMapHandle } from './platform/graphics/scene-depth-map-handle.js';
 export { ScopeId } from './platform/graphics/scope-id.js';
 export { ScopeSpace } from './platform/graphics/scope-space.js';
 export { Shader } from './platform/graphics/shader.js';
@@ -149,6 +152,7 @@ export { BatchGroup } from './scene/batching/batch-group.js';
 export { SkinBatchInstance } from './scene/batching/skin-batch-instance.js';
 export { BatchManager } from './scene/batching/batch-manager.js';
 export { Camera } from './scene/camera.js';
+export { RenderView } from './scene/render-view.js';
 export { WorldClusters } from './scene/lighting/world-clusters.js';
 export { ForwardRenderer } from './scene/renderer/forward-renderer.js';
 export { GraphNode } from './scene/graph-node.js';
@@ -182,7 +186,6 @@ export { EnvLighting } from './scene/graphics/env-lighting.js';
 export { PostEffect } from './scene/graphics/post-effect.js';
 export { FramePass } from './platform/graphics/frame-pass.js';
 export { FramePassColorGrab } from './scene/graphics/frame-pass-color-grab.js';
-export { FramePassRadixSort } from './scene/graphics/frame-pass-radix-sort.js';
 export { RenderPassShaderQuad } from './scene/graphics/render-pass-shader-quad.js';
 export { reprojectTexture } from './scene/graphics/reproject-texture.js';
 
@@ -196,12 +199,14 @@ export { StandardMaterialOptions } from './scene/materials/standard-material-opt
 // SCENE / PROCEDURAL
 export { calculateNormals, calculateTangents } from './scene/geometry/geometry-utils.js';
 export { CapsuleGeometry } from './scene/geometry/capsule-geometry.js';
+export { CircleGeometry } from './scene/geometry/circle-geometry.js';
 export { ConeGeometry } from './scene/geometry/cone-geometry.js';
 export { CylinderGeometry } from './scene/geometry/cylinder-geometry.js';
 export { DomeGeometry } from './scene/geometry/dome-geometry.js';
 export { Geometry } from './scene/geometry/geometry.js';
 export { BoxGeometry } from './scene/geometry/box-geometry.js';
 export { PlaneGeometry } from './scene/geometry/plane-geometry.js';
+export { RoundedBoxGeometry } from './scene/geometry/rounded-box-geometry.js';
 export { SphereGeometry } from './scene/geometry/sphere-geometry.js';
 export { TorusGeometry } from './scene/geometry/torus-geometry.js';
 
@@ -220,12 +225,15 @@ export { ShaderChunks } from './scene/shader-lib/shader-chunks.js';
 export { Sky } from './scene/skybox/sky.js';
 
 // SCENE / SPLAT
+export { GSplatCompressedResource } from './scene/gsplat/gsplat-compressed-resource.js';
 export { GSplatContainer } from './scene/gsplat/gsplat-container.js';
 export { GSplatData } from './scene/gsplat/gsplat-data.js';
 export { GSplatFormat } from './scene/gsplat/gsplat-format.js';
 export { GSplatInstance } from './scene/gsplat/gsplat-instance.js';
+export { GSplatOctreeResource } from './scene/gsplat-unified/gsplat-octree.resource.js';
 export { GSplatProcessor } from './framework/gsplat/gsplat-processor.js';
 export { GSplatResource } from './scene/gsplat/gsplat-resource.js';
+export { GSplatVaryings } from './scene/gsplat-unified/gsplat-varyings.js';
 export { GSplatResourceBase } from './scene/gsplat/gsplat-resource-base.js';
 export { GSplatSogData } from './scene/gsplat/gsplat-sog-data.js';
 export { GSplatSogResource } from './scene/gsplat/gsplat-sog-resource.js';
@@ -235,7 +243,9 @@ export * from './framework/constants.js';
 export { script } from './framework/script.js';
 export { AppBase, app } from './framework/app-base.js';
 export { AppOptions } from './framework/app-options.js';
+export { AppStats } from './framework/app-stats.js';
 export { Application } from './framework/application.js';
+export { AmmoPhysicsWorld } from './framework/physics/ammo/ammo-physics-world.js';
 export { AnimationComponent } from './framework/components/animation/component.js';
 export { AnimationComponentSystem } from './framework/components/animation/system.js';
 export { AnimComponent } from './framework/components/anim/component.js';
@@ -257,7 +267,7 @@ export * from './framework/components/element/constants.js';
 export { ElementComponent } from './framework/components/element/component.js';
 export { ElementComponentSystem } from './framework/components/element/system.js';
 export { ElementDragHelper } from './framework/components/element/element-drag-helper.js';
-export { Entity } from './framework/entity.js';
+export * from './framework/entity.js';
 export { GSplatComponent } from './framework/components/gsplat/component.js';
 export { GSplatComponentSystem } from './framework/components/gsplat/system.js';
 export { ImageElement } from './framework/components/element/image-element.js';
@@ -275,14 +285,20 @@ export { LightComponentSystem } from './framework/components/light/system.js';
 export { Lightmapper } from './framework/lightmapper/lightmapper.js';
 export { ModelComponent } from './framework/components/model/component.js';
 export { ModelComponentSystem } from './framework/components/model/system.js';
+export { NullPhysicsWorld } from './framework/physics/null/null-physics-world.js';
 export { ParticleSystemComponent } from './framework/components/particle-system/component.js';
 export { ParticleSystemComponentSystem } from './framework/components/particle-system/system.js';
+export { PhysicsWorld } from './framework/physics/physics-world.js';
 export { PostEffectQueue } from './framework/components/camera/post-effect-queue.js';
 export { RenderComponent } from './framework/components/render/component.js';
 export { RenderComponentSystem } from './framework/components/render/system.js';
 export * from './framework/components/rigid-body/constants.js';
+export { ContactPoint } from './framework/components/rigid-body/contact-point.js';
+export { ContactResult } from './framework/components/rigid-body/contact-result.js';
+export { RaycastResult } from './framework/components/rigid-body/raycast-result.js';
 export { RigidBodyComponent } from './framework/components/rigid-body/component.js';
-export { RigidBodyComponentSystem, ContactPoint, ContactResult, RaycastResult, SingleContactResult } from './framework/components/rigid-body/system.js';
+export { RigidBodyComponentSystem } from './framework/components/rigid-body/system.js';
+export { SingleContactResult } from './framework/components/rigid-body/single-contact-result.js';
 export { SceneRegistry } from './framework/scene-registry.js';
 export { SceneRegistryItem } from './framework/scene-registry-item.js';
 export * from './framework/components/screen/constants.js';
@@ -325,7 +341,7 @@ export { AnimStateGraph } from './framework/anim/state-graph/anim-state-graph.js
 
 // FRAMEWORK / ASSETS
 export * from './framework/asset/constants.js';
-export { Asset } from './framework/asset/asset.js';
+export * from './framework/asset/asset.js';
 export { AssetListLoader } from './framework/asset/asset-list-loader.js';
 export { AssetReference } from './framework/asset/asset-reference.js';
 export { AssetRegistry } from './framework/asset/asset-registry.js';
@@ -343,10 +359,12 @@ export { BundleRegistry } from './framework/bundle/bundle-registry.js';
 // FRAMEWORK / GRAPHICS
 export { Picker } from './framework/graphics/picker.js';
 export { RenderPassPicker } from './framework/graphics/render-pass-picker.js';
+export { SceneDepthReader } from './framework/graphics/scene-depth-reader.js';
 
 // FRAMEWORK / HANDLERS
 export { basisInitialize } from './framework/handlers/basis.js';
 export { dracoInitialize, dracoDecode } from './framework/parsers/draco-decoder.js';
+export { meshoptInitialize } from './framework/parsers/meshopt-decoder.js';
 export { AnimClipHandler } from './framework/handlers/anim-clip.js';
 export { AnimStateGraphHandler } from './framework/handlers/anim-state-graph.js';
 export { AnimationHandler } from './framework/handlers/animation.js';

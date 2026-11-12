@@ -3,6 +3,11 @@ export default /* wgsl */`
 
 #define GSPLAT_CENTER_NOPROJ
 
+// pre-computed model matrix decomposition (declared before includes, used by
+// gsplatWorkBufferGeometryPS)
+uniform model_scale: vec3f;
+uniform model_rotation: vec4f;  // (x,y,z,w) format
+
 #include "gsplatHelpersVS"
 #include "gsplatFormatVS"
 #include "gsplatStructsVS"
@@ -11,6 +16,7 @@ export default /* wgsl */`
 #include "gsplatEvalSHVS"
 #include "gsplatQuatToMat3VS"
 #include "gsplatReadVS"
+#include "gsplatWorkBufferGeometryPS"
 
 // Module-scope output for write functions to access
 var<private> processOutput: FragmentOutput;
@@ -22,13 +28,14 @@ var<private> processOutput: FragmentOutput;
 #include "gsplatModifyVS"
 
 // Packed sub-draw params: (sourceBase, colStart, rowWidth, rowStart)
-varying @interpolate(flat) vSubDraw: vec4i;
+varying @interpolate(flat, either) vSubDraw: vec4i;
 
 uniform uColorMultiply: vec3f;
 
-// pre-computed model matrix decomposition
-uniform model_scale: vec3f;
-uniform model_rotation: vec4f;  // (x,y,z,w) format
+#if SH_BANDS > 0
+    // 1 for an orthographic camera, whose view rays are all parallel to the camera forward
+    uniform uCameraOrtho: u32;
+#endif
 
 #ifdef GSPLAT_ID
     uniform uId: u32;
@@ -44,43 +51,81 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
     // Initialize global splat for format read functions
     setSplat(originalIndex);
 
-    // read center in local space
-    var modelCenter = getCenter();
+    // World-space geometry to store. Rotation/scale default to identity and are only computed on
+    // the full-render path; under GSPLAT_COLOR_ONLY they are ignored by writeSplat (DCE'd).
+    var worldCenter: vec3f;
+    var worldRotation = vec4f(0.0, 0.0, 0.0, 1.0);
+    var worldScale = vec3f(1.0);
+    #if SH_BANDS > 0
+        var dir: vec3f;   // model-space view direction
+    #endif
 
-    // compute world-space center for storage
-    var worldCenter = (uniform.matrix_model * vec4f(modelCenter, 1.0)).xyz;
-    var center: SplatCenter;
-    initCenter(modelCenter, &center);
+    #ifdef GSPLAT_WORKBUFFER_GEOMETRY
 
-    // Get source rotation and scale
-    // getRotation() returns (w,x,y,z) format, convert to (x,y,z,w) for quatMul
-    let srcRotation = getRotation().yzwx;
-    let srcScale = getScale();
+        // Color-only update sourcing geometry from previously written work buffer data at this
+        // destination pixel. The stored center already includes the model transform and
+        // modifySplatCenter / modifySplatRotationScale, so neither is re-applied here.
+        initWorkBufferGeometry(vec2i(input.position.xy));
+        worldCenter = workBufferWorldCenter();
 
-    // Combine: world = model * source (both in x,y,z,w format)
-    var worldRotation = vec4f(quatMul(half4(uniform.model_rotation), half4(srcRotation)));
-    // Ensure w is positive so sqrt() reconstruction works correctly
-    // (quaternions q and -q represent the same rotation)
-    if (worldRotation.w < 0.0) {
-        worldRotation = -worldRotation;
-    }
-    var worldScale = uniform.model_scale * srcScale;
+        #if SH_BANDS > 0
+            // model-space view direction (matches the source path up to non-uniform model scale).
+            // Orthographic uses the world-space camera forward, (0, 0, -1) taken out of view space.
+            let view = uniform.matrix_view;
+            let orthoDir = vec3f(0.0, 0.0, -1.0) * mat3x3f(view[0].xyz, view[1].xyz, view[2].xyz);
+            let viewDir = select(worldCenter - uniform.uCameraPosition, orthoDir, uniform.uCameraOrtho != 0u);
+            dir = normalize(quatRotateInv(uniform.model_rotation, viewDir));
+        #endif
 
-    // Apply custom center modification
-    let originalCenter = worldCenter;
-    modifySplatCenter(&worldCenter);
+    #else
 
-    // Apply custom rotation/scale modification
-    modifySplatRotationScale(originalCenter, worldCenter, &worldRotation, &worldScale);
+        // read center in local space
+        var modelCenter = getCenter();
+
+        // compute world-space center for storage
+        worldCenter = (uniform.matrix_model * vec4f(modelCenter, 1.0)).xyz;
+        var center: SplatCenter;
+        initCenter(modelCenter, &center);
+
+        // Get source rotation and scale
+        // getRotation() returns (w,x,y,z) format, convert to (x,y,z,w) for quatMul
+        let srcRotation = getRotation().yzwx;
+        let srcScale = getScale();
+
+        // Combine: world = model * source (both in x,y,z,w format)
+        worldRotation = vec4f(quatMul(half4(uniform.model_rotation), half4(srcRotation)));
+        // Ensure w is positive so sqrt() reconstruction works correctly
+        // (quaternions q and -q represent the same rotation)
+        if (worldRotation.w < 0.0) {
+            worldRotation = -worldRotation;
+        }
+        worldScale = uniform.model_scale * srcScale;
+
+        // Apply custom center modification
+        let originalCenter = worldCenter;
+        modifySplatCenter(&worldCenter);
+
+        // Apply custom rotation/scale modification
+        modifySplatRotationScale(originalCenter, worldCenter, &worldRotation, &worldScale);
+
+        #if SH_BANDS > 0
+            // calculate the model-space view direction. Orthographic view rays are all parallel to
+            // the camera forward, rather than running from the camera position to the splat.
+            // Firefox on Windows (D3D12) returns a transposed matrix when a struct member is indexed
+            // through a pointer, so load the whole matrix into a local first. Remove the local once
+            // the fix has shipped: https://bugzilla.mozilla.org/show_bug.cgi?id=2059727
+            let modelView = center.modelView;
+            let viewDir = select(center.view, vec3f(0.0, 0.0, -1.0), uniform.uCameraOrtho != 0u);
+            dir = normalize(viewDir * mat3x3f(modelView[0].xyz, modelView[1].xyz, modelView[2].xyz));
+        #endif
+
+    #endif
 
     // read color
     var color = getColor();
 
     // evaluate spherical harmonics
     #if SH_BANDS > 0
-        // calculate the model-space view direction
-        let dir = normalize(center.view * mat3x3f(center.modelView[0].xyz, center.modelView[1].xyz, center.modelView[2].xyz));
-
         // read sh coefficients
         var sh: array<half3, SH_COEFFS>;
         var scale: f32;
@@ -95,7 +140,8 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 
     color = vec4f(color.xyz * uniform.uColorMultiply, color.w);
 
-    // write color + transform using format-specific encoding
+    // write color + transform using format-specific encoding (rotation/scale ignored under
+    // GSPLAT_COLOR_ONLY)
     writeSplat(worldCenter, worldRotation, worldScale, color);
 
     #ifdef GSPLAT_ID

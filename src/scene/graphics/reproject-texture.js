@@ -1,8 +1,9 @@
-import { Debug } from '../../core/debug.js';
+import { Debug, DebugHelper } from '../../core/debug.js';
 import { random } from '../../core/math/random.js';
 import { Vec3 } from '../../core/math/vec3.js';
 import {
     FILTER_NEAREST,
+    RENDERTARGET_ORIGIN_BOTTOM,
     TEXTUREPROJECTION_OCTAHEDRAL, TEXTUREPROJECTION_CUBE,
     SEMANTIC_POSITION
 } from '../../platform/graphics/constants.js';
@@ -494,12 +495,18 @@ function reprojectTexture(source, target, options = {}) {
                 colorBuffer: target,
                 face: f,
                 depth: false,
-                flipY: device.isWebGPU
+                origin: RENDERTARGET_ORIGIN_BOTTOM
             });
+            DebugHelper.setName(renderTarget, {
+                none: 'Reproject',
+                phong: 'PrefilterPhong',
+                ggx: 'PrefilterGGX',
+                lambert: 'PrefilterLambert'
+            }[distribution] ?? 'Reproject');
             params[0] = f;
             constantParams.setValue(params);
 
-            drawQuadWithShader(device, renderTarget, shader, options?.rect);
+            drawQuadWithShader(device, renderTarget, shader, options?.rect, undefined, renderTarget.name);
 
             renderTarget.destroy();
         }

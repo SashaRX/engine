@@ -4,6 +4,7 @@ import { getProgramLibrary } from './get-program-library.js';
 import { Debug } from '../../core/debug.js';
 import { ShaderGenerator } from './programs/shader-generator.js';
 import { ShaderPass } from '../shader-pass.js';
+import { SHADERDEF_BATCH, SHADERDEF_INSTANCEINDEX, SHADERDEF_INSTANCING } from '../constants.js';
 import { SHADERLANGUAGE_GLSL, SHADERLANGUAGE_WGSL } from '../../platform/graphics/constants.js';
 import { ShaderChunks } from './shader-chunks.js';
 import { MapUtils } from '../../core/map-utils.js';
@@ -73,18 +74,20 @@ class ShaderUtils {
      * @param {Map<string, string>} [options.vertexIncludes] - A map containing key-value pairs of
      * include names and their content. These are used for resolving #include directives in the
      * vertex shader source.
-     * @param {Map<string, string>} [options.vertexDefines] - A map containing key-value pairs of
-     * define names and their values. These are used for resolving #ifdef style of directives in the
-     * vertex code.
+     * @param {Map<string, string|number|boolean>} [options.vertexDefines] - A map containing
+     * key-value pairs of define names and their values. These are used for resolving #ifdef style
+     * of directives in the vertex code.
      * @param {Map<string, string>} [options.fragmentIncludes] - A map containing key-value pairs
      * of include names and their content. These are used for resolving #include directives in the
      * fragment shader source.
-     * @param {Map<string, string>} [options.fragmentDefines] - A map containing key-value pairs of
-     * define names and their values. These are used for resolving #ifdef style of directives in the
-     * fragment code.
+     * @param {Map<string, string|number|boolean>} [options.fragmentDefines] - A map containing
+     * key-value pairs of define names and their values. These are used for resolving #ifdef style
+     * of directives in the fragment code.
      * @param {string | string[]} [options.fragmentOutputTypes] - Fragment shader output types,
      * which default to vec4. Passing a string will set the output type for all color attachments.
      * Passing an array will set the output type for each color attachment.
+     * @param {boolean} [options.useDualSourceBlending] - Whether the fragment shader outputs a
+     * secondary color for dual-source blending. Defaults to false.
      * @returns {Shader} The newly created shader.
      */
     static createShader(device, options) {
@@ -122,7 +125,8 @@ class ShaderUtils {
                 vertexDefines: options.vertexDefines,
                 fragmentIncludes: fragmentIncludes,
                 fragmentDefines: options.fragmentDefines,
-                fragmentOutputTypes: options.fragmentOutputTypes
+                fragmentOutputTypes: options.fragmentOutputTypes,
+                useDualSourceBlending: options.useDualSourceBlending
             }));
             programLibrary.setCachedShader(options.uniqueName, shader);
         }
@@ -134,7 +138,7 @@ class ShaderUtils {
      *
      * @param {Material} material - The material to create the shader defines for.
      * @param {ShaderVariantParams} params - The shader variant parameters.
-     * @returns {Map<string, string>} The map of shader defines.
+     * @returns {Map<string, string|number|boolean>} The map of shader defines.
      * @ignore
      */
     static getCoreDefines(material, params) {
@@ -146,6 +150,13 @@ class ShaderUtils {
         // add pass defines
         const shaderPassInfo = ShaderPass.get(params.device).getByIndex(params.pass);
         shaderPassInfo.defines.forEach((value, key) => defines.set(key, value));
+
+        // the model and normal matrices are read from the mesh instance storage, indexed by the first
+        // instance of the draw - unless the draws use the instance index for their own data, and
+        // batching reads the matrices of its bones instead
+        if (params.device.supportsMeshInstanceStorage && (params.objDefs & (SHADERDEF_INSTANCING | SHADERDEF_BATCH | SHADERDEF_INSTANCEINDEX)) === 0) {
+            defines.set('MESH_INSTANCE_STORAGE', '');
+        }
 
         return defines;
     }
@@ -188,30 +199,65 @@ class ShaderUtils {
     }
 
     /**
-     * Add defines required for correct screenDepthPS chunk functionality for the given camera
-     * shader parameters.
+     * Returns a key identifying the defines {@link ShaderUtils.addScreenDepthChunkDefines} adds for
+     * the given camera shader parameters. As the shader cache is keyed on the unique name of a
+     * shader alone, the name of every shader using those defines has to include this key, or two
+     * differently decoding variants would share a single compiled shader.
      *
-     * @param {GraphicsDevice} device - The graphics device.
      * @param {CameraShaderParams} cameraShaderParams - The camera shader parameters.
+     * @returns {string} The key, empty when the defines add nothing.
      * @ignore
      */
-    static addScreenDepthChunkDefines(device, cameraShaderParams, defines) {
+    static getScreenDepthChunkKey(cameraShaderParams) {
+        const { sceneDepthMapLinear, sceneDepthMapPacked, sceneDepthMapReciprocal } = cameraShaderParams;
+        if (!sceneDepthMapLinear) {
+            return '';
+        }
+        if (sceneDepthMapPacked) {
+            return '-linearPacked';
+        }
+        return sceneDepthMapReciprocal ? '-linearReciprocal' : '-linear';
+    }
+
+    /**
+     * Add defines required for correct screenDepthPS chunk functionality for the given camera
+     * shader parameters. These describe how the scene depth map currently assigned to the camera is
+     * encoded, and are declared by whichever render pass produced it, as different producers store
+     * the depth in different formats.
+     *
+     * @param {CameraShaderParams} cameraShaderParams - The camera shader parameters.
+     * @param {Map<string, string>} defines - The map of defines to add to.
+     * @returns {string} The key of the added defines, to be included in the unique name of the
+     * shader using them. See {@link ShaderUtils.getScreenDepthChunkKey}.
+     * @ignore
+     */
+    static addScreenDepthChunkDefines(cameraShaderParams, defines) {
         if (cameraShaderParams.sceneDepthMapLinear) {
             defines.set('SCENE_DEPTHMAP_LINEAR', '');
+
+            // nested, so that the packed define never appears without the linear one, which is what
+            // the decode in the screenDepth chunk relies on
+            if (cameraShaderParams.sceneDepthMapPacked) {
+                defines.set('SCENE_DEPTHMAP_PACKED', '');
+            }
+
+            // likewise nested - the reciprocal decode inverts what the linear map holds
+            if (cameraShaderParams.sceneDepthMapReciprocal) {
+                defines.set('SCENE_DEPTHMAP_RECIPROCAL', '');
+            }
         }
-        if (device.textureFloatRenderable) {
-            defines.set('SCENE_DEPTHMAP_FLOAT', '');
-        }
+
+        return ShaderUtils.getScreenDepthChunkKey(cameraShaderParams);
     }
 }
 
 function createShader(device, vsName, fsName, useTransformFeedback = false, shaderDefinitionOptions = {}) {
-    Debug.removed('pc.createShader has been removed deprecated. Use ShaderUtils.createShader instead.');
+    Debug.removed('createShader has been removed deprecated. Use ShaderUtils.createShader instead.');
 }
 
 function createShaderFromCode(device, vsCode, fsCode, uniqueName, attributes, useTransformFeedback = false, shaderDefinitionOptions = {}) {
 
-    Debug.deprecated('pc.createShaderFromCode has been deprecated. Use ShaderUtils.createShader instead.');
+    Debug.deprecated('createShaderFromCode has been deprecated. Use ShaderUtils.createShader instead.');
 
     // the function signature has changed, fail if called incorrectly
     Debug.assert(typeof attributes !== 'boolean');

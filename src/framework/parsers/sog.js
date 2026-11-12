@@ -93,20 +93,25 @@ class SogParser {
     /** @type {AppBase} */
     app;
 
-    /** @type {number} */
-    maxRetries;
-
     /**
      * @param {AppBase} app - The app instance.
-     * @param {number} maxRetries - Maximum amount of retries.
      */
-    constructor(app, maxRetries) {
+    constructor(app) {
         this.app = app;
-        this.maxRetries = maxRetries;
+    }
+
+    canParse(context) {
+        return context.ext === 'json';
     }
 
     /**
-     * Checks if loading should be aborted due to asset unload or invalid device.
+     * Checks if loading should be aborted due to asset unload, app teardown or invalid device.
+     *
+     * Nothing cancels an in-flight request, so any of these callbacks can run after
+     * {@link AppBase#destroy}. That tears down in a fixed order - the asset registry is dropped
+     * before the graphics device is marked destroyed - so a callback can arrive while `app.assets`
+     * is already null and the device still looks alive. Every access here has to tolerate that,
+     * hence the optional chaining on the registry rather than only on the device.
      *
      * @param {Asset} asset - The asset being loaded.
      * @param {boolean} unloaded - Whether the asset was unloaded during async loading.
@@ -114,32 +119,38 @@ class SogParser {
      * @private
      */
     _shouldAbort(asset, unloaded) {
-        if (unloaded || !this.app.assets.get(asset.id)) return true;
+        if (unloaded) return true;
         if (!this.app?.graphicsDevice || this.app.graphicsDevice._destroyed) return true;
-        return false;
+        return !this.app.assets?.get(asset.id);
     }
 
     async loadTextures(url, callback, asset, meta) {
         const gsplatCentersEnabledAtLoad = this.app.scene?.gsplatCentersEnabled !== false;
 
         // transform meta to latest shape
-        if (meta.version !== 2) {
+        if (meta.version === undefined) {
             Debug.deprecated('Loading SOG v1 data which is deprecated. Please recompress your scene with latest tools.');
             meta = upgradeMeta(meta);
+        } else if (meta.version !== 2 && meta.version !== 3) {
+            callback(`Error loading gsplat: unsupported SOG version ${meta.version} in ${url.original}`);
+            return;
         }
 
         const { assets } = this.app;
 
-        const subs = ['means', 'quats', 'scales', 'sh0', 'shN'];
+        // v3 may carry per-gaussian blind data
+        const subs = ['means', 'quats', 'scales', 'sh0', 'shN', 'blind'];
 
         const textures = {};
         const promises = [];
+        const base = window.document?.baseURI ?? window.location.href;
 
         subs.forEach((sub) => {
-            const files = meta[sub]?.files ?? [];
+            // blind is a list of textures, each with its own file
+            const files = sub === 'blind' ? (meta.blind ?? []).map(t => t.files[0]) : (meta[sub]?.files ?? []);
             textures[sub] = files.map((filename) => {
                 const texture = new Asset(filename, 'texture', {
-                    url: asset.options?.mapUrl?.(filename) ?? (new URL(filename, new URL(url.load, window.location.href).toString())).toString(),
+                    url: asset.options?.mapUrl?.(filename) ?? (new URL(filename, new URL(url.load, base).toString())).toString(),
                     filename
                 }, {
                     mipmaps: false
@@ -164,7 +175,14 @@ class SogParser {
         // Track if asset was unloaded during async loading
         let unloaded = false;
 
-        // When the parent gsplat asset unloads, remove and unload child texture assets
+        // Set once the GSplatSogResource takes ownership of the textures: from then on they may
+        // only be destroyed through the resource's (ref-count deferred) destroy, as the unified
+        // world may still be rendering from them when the asset unloads.
+        let ownedByResource = false;
+
+        // When the parent gsplat asset unloads, remove child texture assets from the registry.
+        // Destroy their texture resources only while the load is still in flight (cancellation);
+        // once owned by the resource, destruction is left to it.
         asset.once('unload', () => {
             unloaded = true;
 
@@ -172,8 +190,16 @@ class SogParser {
                 // remove from registry
                 assets.remove(t);
 
-                // destroys resource
-                t.unload();
+                if (!ownedByResource) {
+                    // destroys resource
+                    t.unload();
+                } else {
+                    // The resource destroys the textures (possibly deferred), but they stay in
+                    // the loader cache as t.unload() is not called. Clear the cache entries so
+                    // a later load of the same urls recreates the textures instead of reusing
+                    // the cached, destroyed ones.
+                    assets._loader.clearCache(t.getFileUrl(), t.type);
+                }
             });
         });
 
@@ -182,7 +208,7 @@ class SogParser {
         textureAssets.forEach(t => assets.load(t));
 
         // wait for all textures to complete loading
-        await Promise.allSettled(promises);
+        const results = await Promise.allSettled(promises);
 
         if (this._shouldAbort(asset, unloaded)) {
             // Clean up texture assets that were created during the async load
@@ -191,6 +217,17 @@ class SogParser {
                 t.unload();
             });
             callback(null, null);
+            return;
+        }
+
+        // a texture that failed to load has no resource, so fail the whole load
+        const failed = results.findIndex(r => r.status === 'rejected');
+        if (failed !== -1) {
+            textureAssets.forEach((t) => {
+                assets.remove(t);
+                t.unload();
+            });
+            callback(`Error loading gsplat: failed to load ${textureAssets[failed].file.filename} in ${url.original}: ${results[failed].reason}`);
             return;
         }
 
@@ -206,6 +243,7 @@ class SogParser {
         data.sh0 = textures.sh0[0].resource;
         data.sh_centroids = textures.shN?.[0]?.resource;
         data.sh_labels = textures.shN?.[1]?.resource;
+        data.blind = textures.blind.map(t => t.resource);
         data.shBands = GSplatSogData.calcBands(data.sh_centroids?.width);
 
         const decompress = asset.data?.decompress;
@@ -220,7 +258,13 @@ class SogParser {
             // no need to prepare gpu data if decompressing
             data.prepareCodebook();
             if (gsplatCentersEnabledAtLoad) {
-                await data.prepareGpuData();
+                // An unload must cancel preparation even if the device never recovers.
+                const onUnload = asset.once('unload', () => data.destroy());
+                try {
+                    await data.prepareGpuData();
+                } finally {
+                    onUnload.off();
+                }
             }
         }
 
@@ -234,6 +278,11 @@ class SogParser {
         const resource = decompress ?
             new GSplatResource(this.app.graphicsDevice, await data.decompress(), { prepareCenters }) :
             new GSplatSogResource(this.app.graphicsDevice, data, { prepareCenters });
+        resource.antiAlias = data.meta.model === 'antialiased';
+
+        // the sog resource now owns the textures in `data` (when decompressing, the decompressed
+        // data was copied out instead and the textures stay with the texture assets)
+        ownedByResource = !decompress;
 
         if (this._shouldAbort(asset, unloaded)) {
             resource.destroy();
@@ -253,9 +302,14 @@ class SogParser {
      * @param {Asset} asset - Container asset.
      */
     load(url, callback, asset) {
+        // report a throw as a load error instead of leaving the asset loading forever
+        const loadTextures = (meta) => {
+            this.loadTextures(url, callback, asset, meta).catch(err => callback(`Error loading gsplat: ${url.original} [${err}]`));
+        };
+
         if (asset.data?.means) {
             // user can specify meta.json in asset data
-            this.loadTextures(url, callback, asset, asset.data);
+            loadTextures(asset.data);
         } else {
             // otherwise download meta.json using asset url
             if (typeof url === 'string') {
@@ -267,8 +321,8 @@ class SogParser {
 
             // we need to specify JSON for blob URLs
             const options = {
-                retry: this.maxRetries > 0,
-                maxRetries: this.maxRetries,
+                retry: this.handler.maxRetries > 0,
+                maxRetries: this.handler.maxRetries,
                 responseType: Http.ResponseType.JSON
             };
 
@@ -279,7 +333,7 @@ class SogParser {
                 }
 
                 if (!err) {
-                    this.loadTextures(url, callback, asset, meta);
+                    loadTextures(meta);
                 } else {
                     callback(`Error loading gsplat meta: ${url.original} [${err}]`);
                 }

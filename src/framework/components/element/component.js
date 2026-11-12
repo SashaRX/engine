@@ -15,6 +15,7 @@ import { ImageElement } from './image-element.js';
 import { TextElement } from './text-element.js';
 
 /**
+ * @import { Asset } from '../../asset/asset.js'
  * @import { BoundingBox } from '../../../core/shape/bounding-box.js'
  * @import { CanvasFont } from '../../../framework/font/canvas-font.js'
  * @import { Color } from '../../../core/math/color.js'
@@ -36,6 +37,9 @@ const matB = new Mat4();
 const matC = new Mat4();
 const matD = new Mat4();
 
+// scratch corners used when computing content bounds for culling
+const tmpCorners = [new Vec3(), new Vec3(), new Vec3(), new Vec3()];
+
 /**
  * ElementComponents are used to construct user interfaces. The {@link type} property can be
  * configured in 3 main ways: as a text element, as an image element or as a group element. If
@@ -48,7 +52,7 @@ const matD = new Mat4();
  * ElementComponent to an {@link Entity}, use {@link Entity#addComponent}:
  *
  * ```javascript
- * const entity = new pc.Entity();
+ * const entity = new Entity();
  * entity.addComponent('element'); // This defaults to a 'group' element
  * ```
  *
@@ -56,12 +60,12 @@ const matD = new Mat4();
  *
  * ```javascript
  * entity.addComponent('element', {
- *     anchor: new pc.Vec4(0.5, 0.5, 0.5, 0.5), // centered anchor
+ *     anchor: new Vec4(0.5, 0.5, 0.5, 0.5), // centered anchor
  *     fontAsset: fontAsset,
  *     fontSize: 128,
- *     pivot: new pc.Vec2(0.5, 0.5),            // centered pivot
+ *     pivot: new Vec2(0.5, 0.5),            // centered pivot
  *     text: 'Hello World!',
- *     type: pc.ELEMENTTYPE_TEXT
+ *     type: ELEMENTTYPE_TEXT
  * });
  * ```
  *
@@ -69,17 +73,25 @@ const matD = new Mat4();
  * {@link Entity#element} property:
  *
  * ```javascript
- * entity.element.color = pc.Color.RED; // Set the element's color to red
+ * entity.element.color = Color.RED; // Set the element's color to red
  *
  * console.log(entity.element.color);   // Get the element's color and print it
  * ```
  *
  * Relevant Engine API examples:
  *
+ * - [Anchors](https://playcanvas.github.io/#/user-interface/anchors)
+ * - [Image fitting](https://playcanvas.github.io/#/user-interface/image-fit)
+ * - [Sliced panels](https://playcanvas.github.io/#/user-interface/panel)
+ * - [Masking](https://playcanvas.github.io/#/user-interface/masking)
+ * - [Rendering 3D into an image](https://playcanvas.github.io/#/user-interface/render-to-image)
+ * - [Custom shader](https://playcanvas.github.io/#/user-interface/custom-shader)
  * - [Basic text rendering](https://playcanvas.github.io/#/user-interface/text)
  * - [Auto font sizing](https://playcanvas.github.io/#/user-interface/text-auto-font-size)
  * - [Emojis](https://playcanvas.github.io/#/user-interface/text-emojis)
+ * - [Justified text](https://playcanvas.github.io/#/user-interface/text-justify)
  * - [Text localization](https://playcanvas.github.io/#/user-interface/text-localization)
+ * - [Text markup](https://playcanvas.github.io/#/user-interface/text-markup)
  * - [Typewriter text](https://playcanvas.github.io/#/user-interface/text-typewriter)
  *
  * @hideconstructor
@@ -159,9 +171,10 @@ class ElementComponent extends Component {
     static EVENT_MOUSEWHEEL = 'mousewheel';
 
     /**
-     * Fired when the mouse is pressed and released on the component or when a touch starts and
-     * ends on the component. Only fired when useInput is true. The handler is passed an
-     * {@link ElementMouseEvent} or {@link ElementTouchEvent}.
+     * Fired when the mouse is pressed and released on the component, when a touch starts and ends
+     * on the component, or when an XR input source starts and ends a select action on the
+     * component. Only fired when useInput is true. The handler is passed an
+     * {@link ElementMouseEvent}, {@link ElementTouchEvent} or {@link ElementSelectEvent}.
      *
      * @event
      * @example
@@ -218,6 +231,72 @@ class ElementComponent extends Component {
      * });
      */
     static EVENT_TOUCHCANCEL = 'touchcancel';
+
+    /**
+     * Fired when an XR input source starts a select action, such as pulling a controller trigger
+     * or pinching, while its ray points at the component. Only fired when useInput is true and
+     * the input source's {@link XrInputSource#elementInput} is true. The handler is passed an
+     * {@link ElementSelectEvent}.
+     *
+     * @event
+     * @example
+     * entity.element.on('selectstart', (event) => {
+     *     console.log(`Select start event on entity ${entity.name}`);
+     * });
+     */
+    static EVENT_SELECTSTART = 'selectstart';
+
+    /**
+     * Fired when an XR input source ends a select action that started on the component, even if
+     * its ray no longer points at the component. Only fired when useInput is true. The handler is
+     * passed an {@link ElementSelectEvent}.
+     *
+     * @event
+     * @example
+     * entity.element.on('selectend', (event) => {
+     *     console.log(`Select end event on entity ${entity.name}`);
+     * });
+     */
+    static EVENT_SELECTEND = 'selectend';
+
+    /**
+     * Fired when the ray of an XR input source starts pointing at the component. Only fired when
+     * useInput is true and the input source's {@link XrInputSource#elementInput} is true. The
+     * handler is passed an {@link ElementSelectEvent}.
+     *
+     * @event
+     * @example
+     * entity.element.on('selectenter', (event) => {
+     *     console.log(`Select enter event on entity ${entity.name}`);
+     * });
+     */
+    static EVENT_SELECTENTER = 'selectenter';
+
+    /**
+     * Fired when the ray of an XR input source stops pointing at the component, or when the input
+     * source is removed while its ray points at the component. Only fired when useInput is true.
+     * The handler is passed an {@link ElementSelectEvent}.
+     *
+     * @event
+     * @example
+     * entity.element.on('selectleave', (event) => {
+     *     console.log(`Select leave event on entity ${entity.name}`);
+     * });
+     */
+    static EVENT_SELECTLEAVE = 'selectleave';
+
+    /**
+     * Fired every XR frame while an XR input source holds a select action that started on the
+     * component, even if its ray no longer points at the component. Only fired when useInput is
+     * true. The handler is passed an {@link ElementSelectEvent}.
+     *
+     * @event
+     * @example
+     * entity.element.on('selectmove', (event) => {
+     *     console.log(`Select move event on entity ${entity.name}`);
+     * });
+     */
+    static EVENT_SELECTMOVE = 'selectmove';
 
     /**
      * @type {EventHandle|null}
@@ -328,27 +407,6 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the enabled state of the component.
-     *
-     * @type {boolean}
-     */
-    set enabled(value) {
-        const data = this.data;
-        const oldValue = data.enabled;
-        data.enabled = value;
-        this.fire('set', 'enabled', oldValue, value);
-    }
-
-    /**
-     * Gets the enabled state of the component.
-     *
-     * @type {boolean}
-     */
-    get enabled() {
-        return this.data.enabled;
-    }
-
-    /**
      * @type {number}
      * @private
      */
@@ -422,7 +480,7 @@ class ElementComponent extends Component {
      * will make the component resize exactly as its parent.
      *
      * @example
-     * this.entity.element.anchor = new pc.Vec4(Math.random() * 0.1, 0, 1, 0);
+     * this.entity.element.anchor = new Vec4(Math.random() * 0.1, 0, 1, 0);
      * @example
      * this.entity.element.anchor = [Math.random() * 0.1, 0, 1, 0];
      *
@@ -451,9 +509,9 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Gets the anchor for this element component.
+     * Gets the anchor for this element component. Use the setter to update the anchor.
      *
-     * @type {Vec4 | number[]}
+     * @type {Readonly<Vec4>}
      */
     get anchor() {
         return this._anchor;
@@ -500,7 +558,8 @@ class ElementComponent extends Component {
 
     /**
      * Sets the distance from the bottom edge of the anchor. Can be used in combination with a
-     * split anchor to make the component's top edge always be 'top' units away from the top.
+     * split anchor to make the component's bottom edge always be 'bottom' units away from the
+     * bottom.
      *
      * @type {number}
      */
@@ -690,7 +749,7 @@ class ElementComponent extends Component {
     /**
      * Gets the array of layer IDs ({@link Layer#id}) to which this element belongs.
      *
-     * @type {number[]}
+     * @type {ReadonlyArray<number>}
      */
     get layers() {
         return this._layers;
@@ -736,9 +795,10 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Gets the distance from the left, bottom, right and top edges of the anchor.
+     * Gets the distance from the left, bottom, right and top edges of the anchor. Use the setter to
+     * update the margin.
      *
-     * @type {Vec4}
+     * @type {Readonly<Vec4>}
      */
     get margin() {
         return this._margin;
@@ -761,7 +821,7 @@ class ElementComponent extends Component {
      * @example
      * this.entity.element.pivot = [Math.random() * 0.1, Math.random() * 0.1];
      * @example
-     * this.entity.element.pivot = new pc.Vec2(Math.random() * 0.1, Math.random() * 0.1);
+     * this.entity.element.pivot = new Vec2(Math.random() * 0.1, Math.random() * 0.1);
      *
      * @type {Vec2 | number[]}
      */
@@ -800,9 +860,10 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Gets the position of the pivot of the component relative to its anchor.
+     * Gets the position of the pivot of the component relative to its anchor. Use the setter to
+     * update the pivot.
      *
-     * @type {Vec2 | number[]}
+     * @type {Readonly<Vec2>}
      */
     get pivot() {
         return this._pivot;
@@ -848,26 +909,7 @@ class ElementComponent extends Component {
             return this._screenCorners;
         }
 
-        const parentBottomLeft = this.entity.parent && this.entity.parent.element && this.entity.parent.element.screenCorners[0];
-
-        // init corners
-        this._screenCorners[0].set(this._absLeft, this._absBottom, 0);
-        this._screenCorners[1].set(this._absRight, this._absBottom, 0);
-        this._screenCorners[2].set(this._absRight, this._absTop, 0);
-        this._screenCorners[3].set(this._absLeft, this._absTop, 0);
-
-        // transform corners to screen space
-        const screenSpace = this.screen.screen.screenSpace;
-        for (let i = 0; i < 4; i++) {
-            this._screenTransform.transformPoint(this._screenCorners[i], this._screenCorners[i]);
-            if (screenSpace) {
-                this._screenCorners[i].mulScalar(this.screen.screen.scale);
-            }
-
-            if (parentBottomLeft) {
-                this._screenCorners[i].add(parentBottomLeft);
-            }
-        }
+        this._calcScreenCorners(this._absLeft, this._absBottom, this._absRight, this._absTop, this._screenCorners);
 
         this._cornersDirty = false;
         this._canvasCornersDirty = true;
@@ -876,9 +918,37 @@ class ElementComponent extends Component {
         return this._screenCorners;
     }
 
+    // Transforms an anchor-space rectangle (defined by its left/bottom/right/top edges) into the 4
+    // screen-space corners (bottom left, bottom right, top right, top left), populating and
+    // returning the supplied array. This is the shared logic behind screenCorners.
+    _calcScreenCorners(left, bottom, right, top, corners) {
+        const parentBottomLeft = this.entity.parent && this.entity.parent.element && this.entity.parent.element.screenCorners[0];
+
+        // init corners
+        corners[0].set(left, bottom, 0);
+        corners[1].set(right, bottom, 0);
+        corners[2].set(right, top, 0);
+        corners[3].set(left, top, 0);
+
+        // transform corners to screen space
+        const screenSpace = this.screen.screen.screenSpace;
+        for (let i = 0; i < 4; i++) {
+            this._screenTransform.transformPoint(corners[i], corners[i]);
+            if (screenSpace) {
+                corners[i].mulScalar(this.screen.screen.scale);
+            }
+
+            if (parentBottomLeft) {
+                corners[i].add(parentBottomLeft);
+            }
+        }
+
+        return corners;
+    }
+
     /**
      * Gets the width of the text rendered by the component. Only works for
-     * {@link ELEMENTTYPE_TEXT} types.
+     * {@link ELEMENTTYPE_TEXT} elements.
      *
      * @type {number}
      */
@@ -888,7 +958,7 @@ class ElementComponent extends Component {
 
     /**
      * Gets the height of the text rendered by the component. Only works for
-     * {@link ELEMENTTYPE_TEXT} types.
+     * {@link ELEMENTTYPE_TEXT} elements.
      *
      * @type {number}
      */
@@ -898,7 +968,7 @@ class ElementComponent extends Component {
 
     /**
      * Sets the distance from the top edge of the anchor. Can be used in combination with a split
-     * anchor to make the component's bottom edge always be 'bottom' units away from the bottom.
+     * anchor to make the component's top edge always be 'top' units away from the top.
      *
      * @type {number}
      */
@@ -1003,7 +1073,7 @@ class ElementComponent extends Component {
     /**
      * Sets the fit mode of the element. Controls how the content should be fitted and preserve the
      * aspect ratio of the source texture or sprite. Only works for {@link ELEMENTTYPE_IMAGE}
-     * types. Can be:
+     * elements. Can be:
      *
      * - {@link FITMODE_STRETCH}: Fit the content exactly to Element's bounding box.
      * - {@link FITMODE_CONTAIN}: Fit the content within the Element's bounding box while
@@ -1121,7 +1191,9 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the size of the font. Only works for {@link ELEMENTTYPE_TEXT} types.
+     * Sets the size of the font. Measured in the same units as the element's {@link width} and
+     * {@link height}, so its on-screen size depends on whether the element is screen-space or in
+     * world space. Defaults to 32. Only works for {@link ELEMENTTYPE_TEXT} elements.
      *
      * @type {number}
      */
@@ -1144,7 +1216,7 @@ class ElementComponent extends Component {
 
     /**
      * Sets the minimum size that the font can scale to when {@link autoFitWidth} or
-     * {@link autoFitHeight} are true.
+     * {@link autoFitHeight} are true. Defaults to 8.
      *
      * @type {number}
      */
@@ -1168,7 +1240,7 @@ class ElementComponent extends Component {
 
     /**
      * Sets the maximum size that the font can scale to when {@link autoFitWidth} or
-     * {@link autoFitHeight} are true.
+     * {@link autoFitHeight} are true. Defaults to 32.
      *
      * @type {number}
      */
@@ -1201,8 +1273,8 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Gets the maximum number of lines that the Element can wrap to. Returns null for unlimited
-     * lines.
+     * Gets the maximum number of lines that the Element can wrap to. Returns -1 if there is no
+     * limit.
      *
      * @type {number|null}
      */
@@ -1267,8 +1339,9 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the color of the image for {@link ELEMENTTYPE_IMAGE} types or the color of the text for
-     * {@link ELEMENTTYPE_TEXT} types.
+     * Sets the color of the image for {@link ELEMENTTYPE_IMAGE} elements or the color of the text for
+     * {@link ELEMENTTYPE_TEXT} elements, specified in sRGB color space. Only the RGB channels are
+     * used; the alpha channel is ignored, so use {@link opacity} to control transparency.
      *
      * @type {Color}
      */
@@ -1277,9 +1350,9 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Gets the color of the element.
+     * Gets the color of the element. Use the setter to update the color.
      *
-     * @type {Color}
+     * @type {Readonly<Color>}
      */
     get color() {
         if (this._text) {
@@ -1294,7 +1367,7 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the font used for rendering the text. Only works for {@link ELEMENTTYPE_TEXT} types.
+     * Sets the font used for rendering the text. Only works for {@link ELEMENTTYPE_TEXT} elements.
      *
      * @type {Font|CanvasFont}
      */
@@ -1316,10 +1389,10 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the id of the font asset used for rendering the text. Only works for {@link ELEMENTTYPE_TEXT}
-     * types.
+     * Sets the font asset used for rendering the text, as either an {@link Asset} or an asset id.
+     * Only works for {@link ELEMENTTYPE_TEXT} elements.
      *
-     * @type {number}
+     * @type {Asset | number | null}
      */
     set fontAsset(arg) {
         this._setValue('fontAsset', arg);
@@ -1328,7 +1401,7 @@ class ElementComponent extends Component {
     /**
      * Gets the id of the font asset used for rendering the text.
      *
-     * @type {number}
+     * @type {Asset | number | null}
      */
     get fontAsset() {
         if (this._text && typeof this._text.fontAsset === 'number') {
@@ -1339,7 +1412,11 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the spacing between the letters of the text. Only works for {@link ELEMENTTYPE_TEXT} types.
+     * Sets the spacing between the letters of the text, as a multiplier on the default character
+     * advance, defaulting to 1 (normal spacing). Values below 1 tighten the text and values above 1
+     * spread it out. As it scales the advance of each character, wide characters are spread further
+     * apart than narrow ones - use {@link letterSpacing} to space all characters evenly. Only works
+     * for {@link ELEMENTTYPE_TEXT} elements.
      *
      * @type {number}
      */
@@ -1361,7 +1438,36 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the height of each line of text. Only works for {@link ELEMENTTYPE_TEXT} types.
+     * Sets the extra space between the letters of the text, as a fraction of the {@link fontSize},
+     * defaulting to 0. For example, 0.1 adds a tenth of the font size between each pair of
+     * characters, the same for every character, like the CSS `letter-spacing` property. Negative
+     * values tighten the text. The space only goes between characters, so it does not widen a line
+     * past its last character, and it is added on top of {@link spacing}. Only works for
+     * {@link ELEMENTTYPE_TEXT} elements.
+     *
+     * @type {number}
+     */
+    set letterSpacing(arg) {
+        this._setValue('letterSpacing', arg);
+    }
+
+    /**
+     * Gets the extra space between the letters of the text.
+     *
+     * @type {number}
+     */
+    get letterSpacing() {
+        if (this._text) {
+            return this._text.letterSpacing;
+        }
+
+        return null;
+    }
+
+    /**
+     * Sets the height of each line of text, measured in the same units as {@link fontSize}. This is
+     * independent of {@link fontSize}, so it can be used to tighten or loosen vertical line
+     * spacing. Defaults to 32. Only works for {@link ELEMENTTYPE_TEXT} elements.
      *
      * @type {number}
      */
@@ -1384,7 +1490,7 @@ class ElementComponent extends Component {
 
     /**
      * Sets whether to automatically wrap lines based on the element width. Only works for
-     * {@link ELEMENTTYPE_TEXT} types, and when {@link autoWidth} is set to false.
+     * {@link ELEMENTTYPE_TEXT} elements, and when {@link autoWidth} is set to false.
      *
      * @type {boolean}
      */
@@ -1405,10 +1511,39 @@ class ElementComponent extends Component {
         return null;
     }
 
-    set lines(arg) {
-        this._setValue('lines', arg);
+    /**
+     * Sets whether wrapped lines are stretched to be flush with both edges of the element, by
+     * widening the gaps between their words. The last line of the text and any line ended by an
+     * explicit line break are not stretched, and follow {@link alignment} instead - as does a line
+     * with no gaps to widen. Only works for {@link ELEMENTTYPE_TEXT} elements, and only has an
+     * effect when {@link wrapLines} is set to true and the element has a fixed width.
+     *
+     * @type {boolean}
+     */
+    set justify(arg) {
+        this._setValue('justify', arg);
     }
 
+    /**
+     * Gets whether wrapped lines are stretched to be flush with both edges of the element.
+     *
+     * @type {boolean}
+     */
+    get justify() {
+        if (this._text) {
+            return this._text.justify;
+        }
+
+        return null;
+    }
+
+    /**
+     * Gets the lines of rendered text, split by line breaks and word wrapping. Only works for
+     * {@link ELEMENTTYPE_TEXT} elements, and is populated when the text is laid out, so it reads as
+     * `undefined` until the first update.
+     *
+     * @type {string[]}
+     */
     get lines() {
         if (this._text) {
             return this._text.lines;
@@ -1420,9 +1555,9 @@ class ElementComponent extends Component {
     /**
      * Sets the horizontal and vertical alignment of the text. Values range from 0 to 1 where
      * `[0, 0]` is the bottom left and `[1, 1]` is the top right. Only works for
-     * {@link ELEMENTTYPE_TEXT} types.
+     * {@link ELEMENTTYPE_TEXT} elements.
      *
-     * @type {Vec2}
+     * @param {Vec2|number[]} arg - The alignment, as a Vec2 or an array of 2 numbers.
      */
     set alignment(arg) {
         this._setValue('alignment', arg);
@@ -1443,7 +1578,7 @@ class ElementComponent extends Component {
 
     /**
      * Sets whether to automatically set the width of the component to be the same as the
-     * {@link textWidth}. Only works for {@link ELEMENTTYPE_TEXT} types.
+     * {@link textWidth}. Only works for {@link ELEMENTTYPE_TEXT} elements.
      *
      * @type {boolean}
      */
@@ -1467,7 +1602,7 @@ class ElementComponent extends Component {
 
     /**
      * Sets whether to automatically set the height of the component to be the same as the
-     * {@link textHeight}. Only works for {@link ELEMENTTYPE_TEXT} types.
+     * {@link textHeight}. Only works for {@link ELEMENTTYPE_TEXT} elements.
      *
      * @type {boolean}
      */
@@ -1491,7 +1626,7 @@ class ElementComponent extends Component {
 
     /**
      * Sets whether to reorder the text for RTL languages. The reordering uses a function
-     * registered by `app.systems.element.registerUnicodeConverter`.
+     * registered by `app.systems.element.registerRtlReorder`.
      *
      * @type {boolean}
      */
@@ -1536,7 +1671,7 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the text to render. Only works for {@link ELEMENTTYPE_TEXT} types. To override certain
+     * Sets the text to render. Only works for {@link ELEMENTTYPE_TEXT} elements. To override certain
      * text styling properties on a per-character basis, the text can optionally include markup
      * tags contained within square brackets. Supported tags are:
      *
@@ -1576,7 +1711,7 @@ class ElementComponent extends Component {
 
     /**
      * Sets the localization key to use to get the localized text from {@link Application#i18n}.
-     * Only works for {@link ELEMENTTYPE_TEXT} types.
+     * Only works for {@link ELEMENTTYPE_TEXT} elements.
      *
      * @type {string}
      */
@@ -1598,7 +1733,7 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the texture to render. Only works for {@link ELEMENTTYPE_IMAGE} types.
+     * Sets the texture to render. Only works for {@link ELEMENTTYPE_IMAGE} elements.
      *
      * @type {Texture}
      */
@@ -1620,9 +1755,10 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the id of the texture asset to render. Only works for {@link ELEMENTTYPE_IMAGE} types.
+     * Sets the texture asset to render, as either an {@link Asset} or an asset id. Only works for
+     * {@link ELEMENTTYPE_IMAGE} elements.
      *
-     * @type {number}
+     * @type {Asset | number | null}
      */
     set textureAsset(arg) {
         this._setValue('textureAsset', arg);
@@ -1631,7 +1767,7 @@ class ElementComponent extends Component {
     /**
      * Gets the id of the texture asset to render.
      *
-     * @type {number}
+     * @type {Asset | number | null}
      */
     get textureAsset() {
         if (this._image) {
@@ -1642,7 +1778,7 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the material to use when rendering an image. Only works for {@link ELEMENTTYPE_IMAGE} types.
+     * Sets the material to use when rendering an image. Only works for {@link ELEMENTTYPE_IMAGE} elements.
      *
      * @type {Material}
      */
@@ -1664,10 +1800,10 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the id of the material asset to use when rendering an image. Only works for
-     * {@link ELEMENTTYPE_IMAGE} types.
+     * Sets the material asset to use when rendering an image, as either an {@link Asset} or an
+     * asset id. Only works for {@link ELEMENTTYPE_IMAGE} elements.
      *
-     * @type {number}
+     * @type {Asset | number | null}
      */
     set materialAsset(arg) {
         this._setValue('materialAsset', arg);
@@ -1676,7 +1812,7 @@ class ElementComponent extends Component {
     /**
      * Gets the id of the material asset to use when rendering an image.
      *
-     * @type {number}
+     * @type {Asset | number | null}
      */
     get materialAsset() {
         if (this._image) {
@@ -1687,7 +1823,7 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the sprite to render. Only works for {@link ELEMENTTYPE_IMAGE} types which can render
+     * Sets the sprite to render. Only works for {@link ELEMENTTYPE_IMAGE} elements that can render
      * either a texture or a sprite.
      *
      * @type {Sprite}
@@ -1710,10 +1846,10 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the id of the sprite asset to render. Only works for {@link ELEMENTTYPE_IMAGE} types which
-     * can render either a texture or a sprite.
+     * Sets the sprite asset to render, as either an {@link Asset} or an asset id. Only works for
+     * {@link ELEMENTTYPE_IMAGE} elements that can render either a texture or a sprite.
      *
-     * @type {number}
+     * @type {Asset | number | null}
      */
     set spriteAsset(arg) {
         this._setValue('spriteAsset', arg);
@@ -1722,7 +1858,7 @@ class ElementComponent extends Component {
     /**
      * Gets the id of the sprite asset to render.
      *
-     * @type {number}
+     * @type {Asset | number | null}
      */
     get spriteAsset() {
         if (this._image) {
@@ -1733,7 +1869,7 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the frame of the sprite to render. Only works for {@link ELEMENTTYPE_IMAGE} types who have a
+     * Sets the frame of the sprite to render. Only works for {@link ELEMENTTYPE_IMAGE} elements that have a
      * sprite assigned.
      *
      * @type {number}
@@ -1756,10 +1892,11 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the number of pixels that map to one PlayCanvas unit. Only works for
-     * {@link ELEMENTTYPE_IMAGE} types who have a sliced sprite assigned.
+     * Sets the number of pixels that map to one PlayCanvas unit. Only affects
+     * {@link ELEMENTTYPE_IMAGE} elements with a sliced or tiled sprite assigned. Set to null to use
+     * the sprite's own pixels-per-unit value.
      *
-     * @type {number}
+     * @type {number|null}
      */
     set pixelsPerUnit(arg) {
         this._setValue('pixelsPerUnit', arg);
@@ -1768,7 +1905,7 @@ class ElementComponent extends Component {
     /**
      * Gets the number of pixels that map to one PlayCanvas unit.
      *
-     * @type {number}
+     * @type {number|null}
      */
     get pixelsPerUnit() {
         if (this._image) {
@@ -1780,7 +1917,7 @@ class ElementComponent extends Component {
 
     /**
      * Sets the opacity of the element. This works for both {@link ELEMENTTYPE_IMAGE} and
-     * {@link ELEMENTTYPE_TEXT} element types.
+     * {@link ELEMENTTYPE_TEXT} elements.
      *
      * @type {number}
      */
@@ -1807,7 +1944,7 @@ class ElementComponent extends Component {
 
     /**
      * Sets the region of the texture to use in order to render an image. Values range from 0 to 1
-     * and indicate u, v, width, height. Only works for {@link ELEMENTTYPE_IMAGE} types.
+     * and indicate u, v, width, height. Only works for {@link ELEMENTTYPE_IMAGE} elements.
      *
      * @type {Vec4}
      */
@@ -1816,9 +1953,10 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Gets the region of the texture to use in order to render an image.
+     * Gets the region of the texture to use in order to render an image. Use the setter to update
+     * the region.
      *
-     * @type {Vec4}
+     * @type {Readonly<Vec4>|null}
      */
     get rect() {
         if (this._image) {
@@ -1852,7 +1990,8 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the text outline effect color and opacity. Only works for {@link ELEMENTTYPE_TEXT} types.
+     * Sets the text outline effect color and opacity, with the color specified in sRGB color space.
+     * Only works for {@link ELEMENTTYPE_TEXT} elements.
      *
      * @type {Color}
      */
@@ -1873,7 +2012,9 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the width of the text outline effect. Only works for {@link ELEMENTTYPE_TEXT} types.
+     * Sets the width of the text outline effect, ranging from 0 (no outline) to 1 (maximum
+     * thickness). Defaults to 0. Combine with {@link outlineColor} to style the outline. Only works
+     * for {@link ELEMENTTYPE_TEXT} elements.
      *
      * @type {number}
      */
@@ -1895,7 +2036,8 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the text shadow effect color and opacity. Only works for {@link ELEMENTTYPE_TEXT} types.
+     * Sets the text shadow effect color and opacity, with the color specified in sRGB color space.
+     * Only works for {@link ELEMENTTYPE_TEXT} elements.
      *
      * @type {Color}
      */
@@ -1917,19 +2059,27 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the text shadow effect shift amount from original text. Only works for
-     * {@link ELEMENTTYPE_TEXT} types.
+     * Sets the offset of the text shadow, relative to the text. The shadow is a second copy of the
+     * text, tinted with {@link shadowColor} and displaced by this amount. Each component ranges
+     * from -1 to 1 and is proportional to the font size, so the shadow stays consistent as the text
+     * scales; positive x shifts the shadow right and positive y shifts it up. The shadow is only
+     * drawn where it extends past the glyph, so the default of `[0, 0]` produces no visible shadow
+     * and a non-zero offset is required to display one. Only works for {@link ELEMENTTYPE_TEXT}
+     * elements.
      *
-     * @type {number}
+     * @type {Vec2}
+     * @example
+     * // drop shadow, down and to the right of the text
+     * this.entity.element.shadowOffset = new Vec2(0.25, -0.25);
      */
     set shadowOffset(arg) {
         this._setValue('shadowOffset', arg);
     }
 
     /**
-     * Gets the text shadow effect shift amount from original text.
+     * Gets the offset of the text shadow, relative to the text.
      *
-     * @type {number}
+     * @type {Vec2}
      */
     get shadowOffset() {
         if (this._text) {
@@ -1941,7 +2091,7 @@ class ElementComponent extends Component {
 
     /**
      * Sets whether markup processing is enabled for this element. Only works for
-     * {@link ELEMENTTYPE_TEXT} types. Defaults to false.
+     * {@link ELEMENTTYPE_TEXT} elements. Defaults to false.
      *
      * @type {boolean}
      */
@@ -1963,7 +2113,7 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the index of the first character to render. Only works for {@link ELEMENTTYPE_TEXT} types.
+     * Sets the index of the first character to render. Only works for {@link ELEMENTTYPE_TEXT} elements.
      *
      * @type {number}
      */
@@ -1985,7 +2135,7 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the index of the last character to render. Only works for {@link ELEMENTTYPE_TEXT} types.
+     * Sets the index of the last character to render. Only works for {@link ELEMENTTYPE_TEXT} elements.
      *
      * @type {number}
      */
@@ -2507,11 +2657,18 @@ class ElementComponent extends Component {
     }
 
     onLayersChanged(oldComp, newComp) {
-        this.addModelToLayers(this._image ? this._image._renderable.model : this._text._model);
-        oldComp.off('add', this.onLayerAdded, this);
-        oldComp.off('remove', this.onLayerRemoved, this);
-        newComp.on('add', this.onLayerAdded, this);
-        newComp.on('remove', this.onLayerRemoved, this);
+        // group elements have neither an image nor a text element
+        if (this._image) {
+            this.addModelToLayers(this._image._renderable.model);
+        } else if (this._text) {
+            this.addModelToLayers(this._text._model);
+        }
+
+        // store the new handles, so that onDisable can unsubscribe from the current composition
+        this._evtLayerAdded?.off();
+        this._evtLayerAdded = newComp.on('add', this.onLayerAdded, this);
+        this._evtLayerRemoved?.off();
+        this._evtLayerRemoved = newComp.on('remove', this.onLayerRemoved, this);
     }
 
     onLayerAdded(layer) {
@@ -2595,7 +2752,13 @@ class ElementComponent extends Component {
         this.fire('disableelement');
     }
 
-    onRemove() {
+    onBeforeRemove() {
+        // removing a component does not disable it first, so undo what onEnable set up. This runs
+        // before the image / text elements are destroyed below, as onDisable uses them.
+        if (this.enabled && this.entity.enabled) {
+            this.onDisable();
+        }
+
         this.entity.off('insert', this._onInsert, this);
         this._unpatch();
         if (this._image) {
@@ -2814,7 +2977,27 @@ class ElementComponent extends Component {
             clipB = clipT - cameraHeight;
         }
 
-        const hitCorners = this.screenCorners;
+        // A text element's rendered glyphs can overflow its element box (e.g. wrapped text that is
+        // taller or wider than the configured size), so cull against the actual content bounds
+        // rather than the box - otherwise visible text whose box falls outside the clip region is
+        // wrongly culled (see https://github.com/playcanvas/engine/issues/4615).
+        let hitCorners = this.screenCorners;
+        const text = this._text;
+        if (text) {
+            const overflowX = Math.max(0, text.width - this.calculatedWidth);
+            const overflowY = Math.max(0, text.height - this.calculatedHeight);
+            if (overflowX > 0 || overflowY > 0) {
+                const ha = this.alignment.x;
+                const va = this.alignment.y;
+                hitCorners = this._calcScreenCorners(
+                    this._absLeft - ha * overflowX,
+                    this._absBottom - va * overflowY,
+                    this._absRight + (1 - ha) * overflowX,
+                    this._absTop + (1 - va) * overflowY,
+                    tmpCorners
+                );
+            }
+        }
 
         const left = Math.min(Math.min(hitCorners[0].x, hitCorners[1].x), Math.min(hitCorners[2].x, hitCorners[3].x));
         const right = Math.max(Math.max(hitCorners[0].x, hitCorners[1].x), Math.max(hitCorners[2].x, hitCorners[3].x));

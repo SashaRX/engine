@@ -1,23 +1,48 @@
-import { platform } from '../../core/platform.js';
-
-import { DEVICETYPE_WEBGL2, DEVICETYPE_WEBGPU, DEVICETYPE_WEBGPU_BARE, DEVICETYPE_NULL } from './constants.js';
+import { DEVICETYPE_WEBGL2, DEVICETYPE_WEBGL2_BARE, DEVICETYPE_WEBGPU, DEVICETYPE_WEBGPU_BARE, DEVICETYPE_NULL } from './constants.js';
+import { getCanvasNavigatorGpu } from './webgpu/navigator-gpu.js';
 import { WebgpuGraphicsDevice } from './webgpu/webgpu-graphics-device.js';
 import { WebglGraphicsDevice } from './webgl/webgl-graphics-device.js';
 import { NullGraphicsDevice } from './null/null-graphics-device.js';
 
 /**
+ * @import { GraphicsDevice } from './graphics-device.js'
+ */
+
+/**
  * Creates a graphics device.
  *
  * @param {HTMLCanvasElement} canvas - The canvas element.
- * @param {object} options - Graphics device options.
+ * @param {object} [options] - Graphics device options.
  * @param {string[]} [options.deviceTypes] - An array of DEVICETYPE_*** constants, defining the
  * order in which the devices are attempted to get created. Defaults to an empty array. If the
  * specified array does not contain {@link DEVICETYPE_WEBGL2}, it is internally added to its end.
+ * A {@link DEVICETYPE_NULL} device, which renders nothing, is only created if it is specified.
  * Typically, you'd only specify {@link DEVICETYPE_WEBGPU}, or leave it empty. Use
- * {@link DEVICETYPE_WEBGPU_BARE} to create a WebGPU device without optional features and with
- * default spec limits, useful for testing on constrained devices.
+ * {@link DEVICETYPE_WEBGPU_BARE} or {@link DEVICETYPE_WEBGL2_BARE} to create a device without
+ * optional features and with the limits of the least capable devices, useful for testing on
+ * constrained devices.
  * @param {boolean} [options.antialias] - Boolean that indicates whether or not to perform
  * anti-aliasing if possible. Defaults to true.
+ * @param {boolean} [options.alpha] - Boolean that indicates whether the canvas composites with
+ * the page behind it. Defaults to true. This is a compositing option rather than a memory one -
+ * neither backend has an alpha-less backbuffer format that saves any space. The backends
+ * implement it differently:
+ *
+ * - {@link DEVICETYPE_WEBGL2}: forwarded as the WebGL `alpha` context attribute, so the browser
+ * decides whether the drawing buffer actually has an alpha channel. When it does not, the device's
+ * `backBufferFormat` becomes {@link PIXELFORMAT_RGB8} rather than {@link PIXELFORMAT_RGBA8}, which
+ * also changes the format of the scene color grab pass.
+ * - {@link DEVICETYPE_WEBGPU}: selects the canvas alpha mode ('premultiplied' when true, 'opaque'
+ * when false). The backbuffer always has an alpha channel, so `backBufferFormat` is unaffected and
+ * 'opaque' simply tells the compositor to ignore the alpha that is already there.
+ *
+ * Compositing is premultiplied on both backends, so a transparent canvas needs a camera
+ * {@link CameraComponent#clearColor} with both its alpha and its RGB set to zero. A non-zero color
+ * with zero alpha is not valid premultiplied data and composites inconsistently across browsers.
+ *
+ * Note that this default applies to this function. The legacy {@link Application} constructor
+ * instead defaults `alpha` to false.
+ *
  * @param {string} [options.displayFormat] - The display format of the canvas. Defaults to
  * {@link DISPLAYFORMAT_LDR}. Can be:
  *
@@ -36,7 +61,8 @@ import { NullGraphicsDevice } from './null/null-graphics-device.js';
  * {@link DEVICETYPE_WEBGL2} device type creation.
  * @param {string} [options.twgslUrl] - An url to twgsl script, required if glslangUrl was specified.
  * @param {boolean} [options.xrCompatible] - Boolean that hints to the user agent to use a
- * compatible graphics adapter for an immersive XR device.
+ * compatible graphics adapter for an immersive XR device. When omitted in a browser, defaults to
+ * `true` if `navigator.xr` is present, otherwise `false` (see {@link GraphicsDevice} constructor).
  * @param {'default'|'high-performance'|'low-power'} [options.powerPreference] - A hint indicating
  * what configuration of GPU would be selected. Possible values are:
  *
@@ -46,29 +72,37 @@ import { NullGraphicsDevice } from './null/null-graphics-device.js';
  * - 'low-power': Prioritizes power saving over rendering performance.
  *
  * Defaults to 'default'.
+ * @param {boolean} [options.transientColor] - Boolean that requests the multi-sampled (MSAA)
+ * color attachment of the back-buffer to be allocated as a transient ("memoryless") attachment,
+ * allowing tile-based GPUs to keep its contents in on-chip memory and avoid VRAM allocation.
+ * WebGPU only, and only effective when anti-aliasing (MSAA) is enabled - it has no effect on
+ * single-sampled color, which is always presented. Ignored on devices without transient attachment
+ * support. Incompatible with a scene color grab pass (`sceneColorMap`): the attachment must be
+ * cleared on load and discarded on store. Defaults to false.
+ * @param {boolean} [options.transientDepth] - Boolean that requests the back-buffer depth
+ * attachment to be allocated as a transient ("memoryless") attachment (see `transientColor`).
+ * Applies to both single- and multi-sampled depth. WebGPU only; ignored on devices without
+ * transient attachment support. Incompatible with a scene depth grab pass (`sceneDepthMap`), a
+ * depth prepass, or any depth resolve, as the depth cannot be sampled or copied out. Defaults to
+ * false.
  * @param {boolean} [options.reverseZ] - Enables reverse-z depth buffering, which maps the
  * camera near plane to depth=1 and the far plane to depth=0. This significantly improves
  * floating-point depth precision over large view distances and reduces z-fighting at the far
  * plane. WebGPU only — ignored on WebGL2. Defaults to false. Custom shaders that sample the
  * depth buffer with hard-coded forward-z formulas will need updating before opting in.
- * @returns {Promise} - Promise object representing the created graphics device.
+ * @returns {Promise<GraphicsDevice>} - Promise object representing the created graphics device.
+ * It is rejected if none of the device types can be created, with an `AggregateError` whose
+ * `errors` contain the error of each device type that failed.
  * @category Graphics
  */
 function createGraphicsDevice(canvas, options = {}) {
 
     const deviceTypes = options.deviceTypes ?? [];
 
-    // automatically added fallbacks
+    // automatically added fallback. The null device is not added, as it renders nothing, so the
+    // promise rejects when no device can be created
     if (!deviceTypes.includes(DEVICETYPE_WEBGL2)) {
         deviceTypes.push(DEVICETYPE_WEBGL2);
-    }
-    if (!deviceTypes.includes(DEVICETYPE_NULL)) {
-        deviceTypes.push(DEVICETYPE_NULL);
-    }
-
-    // XR compatibility if not specified
-    if (platform.browser && !!navigator.xr) {
-        options.xrCompatible ??= true;
     }
 
     // make a list of device creation functions in priority order
@@ -76,7 +110,7 @@ function createGraphicsDevice(canvas, options = {}) {
     for (let i = 0; i < deviceTypes.length; i++) {
         const deviceType = deviceTypes[i];
 
-        if ((deviceType === DEVICETYPE_WEBGPU || deviceType === DEVICETYPE_WEBGPU_BARE) && window?.navigator?.gpu) {
+        if ((deviceType === DEVICETYPE_WEBGPU || deviceType === DEVICETYPE_WEBGPU_BARE) && getCanvasNavigatorGpu(canvas)) {
             const featureLevel = deviceType === DEVICETYPE_WEBGPU_BARE ? 'bare' : undefined;
             deviceCreateFuncs.push(() => {
                 const device = new WebgpuGraphicsDevice(canvas, { ...options, featureLevel });
@@ -84,9 +118,9 @@ function createGraphicsDevice(canvas, options = {}) {
             });
         }
 
-        if (deviceType === DEVICETYPE_WEBGL2) {
+        if (deviceType === DEVICETYPE_WEBGL2 || deviceType === DEVICETYPE_WEBGL2_BARE) {
             deviceCreateFuncs.push(() => {
-                return new WebglGraphicsDevice(canvas, options);
+                return new WebglGraphicsDevice(canvas, { ...options, deviceType });
             });
         }
 
@@ -100,12 +134,17 @@ function createGraphicsDevice(canvas, options = {}) {
     // execute each device creation function returning the first successful result
     return new Promise((resolve, reject) => {
         let attempt = 0;
+        const errors = [];
         const next = () => {
             if (attempt >= deviceCreateFuncs.length) {
-                reject(new Error('Failed to create a graphics device'));
+                reject(new AggregateError(errors, 'Failed to create a graphics device'));
             } else {
-                Promise.resolve(deviceCreateFuncs[attempt++]())
-                .then((device) => {
+                // create the device inside a promise, so that a synchronous throw (as from the
+                // WebGL device when WebGL 2 is unavailable) is handled below as a rejection,
+                // rather than escaping from next
+                new Promise((resolveAttempt) => {
+                    resolveAttempt(deviceCreateFuncs[attempt++]());
+                }).then((device) => {
                     if (device) {
                         resolve(device);
                     } else {
@@ -113,6 +152,7 @@ function createGraphicsDevice(canvas, options = {}) {
                     }
                 }).catch((err) => {
                     console.log(err);
+                    errors.push(err);
                     next();
                 });
             }

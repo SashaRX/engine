@@ -4,6 +4,8 @@ import gsplatSplatVS from '../chunks/gsplat/vert/gsplatSplat.js';
 import gsplatEvalSHVS from '../chunks/gsplat/vert/gsplatEvalSH.js';
 import gsplatHelpersVS from '../chunks/gsplat/vert/gsplatHelpers.js';
 import gsplatModifyVS from '../chunks/gsplat/vert/gsplatModify.js';
+import gsplatModifyPS from '../chunks/gsplat/frag/gsplatModify.js';
+import gsplatWorkBufferGeometryPS from '../chunks/gsplat/frag/gsplatWorkBufferGeometry.js';
 import gsplatQuatToMat3VS from '../chunks/gsplat/vert/gsplatQuatToMat3.js';
 import gsplatStructsVS from '../chunks/gsplat/vert/gsplatStructs.js';
 import gsplatCornerVS from '../chunks/gsplat/vert/gsplatCorner.js';
@@ -21,6 +23,7 @@ import gsplatCompressedVS from '../chunks/gsplat/vert/formats/compressed.js';
 import gsplatCompressedSHVS from '../chunks/gsplat/vert/formats/compressedSH.js';
 import gsplatSogVS from '../chunks/gsplat/vert/formats/sog.js';
 import gsplatSogSHVS from '../chunks/gsplat/vert/formats/sogSH.js';
+import gsplatSogBlindVS from '../chunks/gsplat/vert/formats/sogBlind.js';
 import gsplatContainerDeclVS from '../chunks/gsplat/vert/formats/containerDecl.js';
 import gsplatContainerReadVS from '../chunks/gsplat/vert/formats/containerRead.js';
 import gsplatContainerFloatReadVS from '../chunks/gsplat/vert/formats/containerFloatRead.js';
@@ -33,6 +36,8 @@ export const gsplatChunksGLSL = {
     gsplatEvalSHVS,
     gsplatHelpersVS,
     gsplatModifyVS,
+    gsplatModifyPS,
+    gsplatWorkBufferGeometryPS,
     gsplatQuatToMat3VS,
     gsplatStructsVS,
     gsplatOutputVS,
@@ -47,6 +52,7 @@ export const gsplatChunksGLSL = {
     gsplatCompressedSHVS,
     gsplatSogVS,
     gsplatSogSHVS,
+    gsplatSogBlindVS,
     gsplatContainerDeclVS,
     gsplatContainerReadVS,
     gsplatContainerFloatReadVS

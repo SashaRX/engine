@@ -1,5 +1,4 @@
 import { math } from '../../core/math/math.js';
-import { calculateTangents } from './geometry-utils.js';
 import { Geometry } from './geometry.js';
 
 /**
@@ -15,13 +14,13 @@ import { Geometry } from './geometry.js';
  *
  * ```javascript
  * // Create a mesh instance
- * const geometry = new pc.TorusGeometry();
- * const mesh = pc.Mesh.fromGeometry(app.graphicsDevice, geometry);
- * const material = new pc.StandardMaterial();
- * const meshInstance = new pc.MeshInstance(mesh, material);
+ * const geometry = new TorusGeometry();
+ * const mesh = Mesh.fromGeometry(app.graphicsDevice, geometry);
+ * const material = new StandardMaterial();
+ * const meshInstance = new MeshInstance(mesh, material);
  *
  * // Create an entity
- * const entity = new pc.Entity();
+ * const entity = new Entity();
  * entity.addComponent('render', {
  *     meshInstances: [meshInstance]
  * });
@@ -42,7 +41,7 @@ class TorusGeometry extends Geometry {
      * @param {object} [opts] - Options object.
      * @param {number} [opts.tubeRadius] - The radius of the tube forming the body of the torus.
      * Defaults to 0.2.
-     * @param {number} [opts.ringRadius] - The radius from the centre of the torus to the centre of the
+     * @param {number} [opts.ringRadius] - The radius from the center of the torus to the center of the
      * tube. Defaults to 0.3.
      * @param {number} [opts.sectorAngle] - The sector angle in degrees of the ring of the torus.
      * Defaults to 2 * Math.PI.
@@ -52,7 +51,7 @@ class TorusGeometry extends Geometry {
      * Defaults to 30.
      * @param {boolean} [opts.calculateTangents] - Generate tangent information. Defaults to false.
      * @example
-     * const geometry = new pc.TorusGeometry({
+     * const geometry = new TorusGeometry({
      *     tubeRadius: 1,
      *     ringRadius: 2,
      *     sectorAngle: 360,
@@ -112,7 +111,7 @@ class TorusGeometry extends Geometry {
         this.indices = indices;
 
         if (opts.calculateTangents) {
-            this.tangents = calculateTangents(positions, normals, uvs, indices);
+            this.calculateTangents();
         }
     }
 }

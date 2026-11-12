@@ -60,6 +60,8 @@ export default /* wgsl */`
             uniform light{i}_cameraParams: vec4f;
             #if LIGHT{i}TYPE == DIRECTIONAL
                 uniform light{i}_softShadowParams: vec4f;
+                // Per-cascade camera parameters, one vec4 per matrix column.
+                uniform light{i}_shadowCascadeParams: mat4x4f;
             #endif
         #endif
 

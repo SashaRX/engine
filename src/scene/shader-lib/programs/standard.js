@@ -1,8 +1,11 @@
 import { Debug } from '../../../core/debug.js';
 import {
-    BLEND_NONE, DITHER_NONE, ditherNames, FRESNEL_SCHLICK,
+    BLEND_NONE, DITHER_NONE, ditherNames,
+    PARALLAX_OFFSET,
     SHADER_FORWARD,
-    SPRITE_RENDERMODE_SLICED, SPRITE_RENDERMODE_TILED
+    SPRITE_RENDERMODE_SLICED, SPRITE_RENDERMODE_TILED,
+    instanceLightmapUniformNames,
+    parallaxNames
 } from '../../constants.js';
 import { ShaderPass } from '../../shader-pass.js';
 import { LitShader } from './lit-shader.js';
@@ -16,9 +19,15 @@ import { MapUtils } from '../../../core/map-utils.js';
 
 /**
  * @import { GraphicsDevice } from '../../../platform/graphics/graphics-device.js'
+ * @import { ShaderPassInfo } from '../../shader-pass.js'
  */
 
-const _matTex2D = [];
+/**
+ * Texture map names mapped to their channel count, in registration order.
+ *
+ * @type {Map<string, number>}
+ */
+const _matTex2D = new Map();
 
 const buildPropertiesList = (options) => {
     return Object.keys(options)
@@ -58,10 +67,13 @@ class ShaderGeneratorStandard extends ShaderGenerator {
      * @param {string} transformPropName - Name of the transform id in the options block. Usually "basenameTransform".
      * @param {string} uVPropName - Name of the UV channel in the options block. Usually "basenameUv".
      * @param {object} options - The options passed into createShaderDefinition.
+     * @param {boolean} [allowParallaxOffset] - True to apply the parallax uv offset to the
+     * expression when a height map is used. Set to false for uv expressions evaluated before
+     * the parallax offset is known, for example the uv used to build the TBN matrix.
      * @returns {string} The code used to replace '*_TEXTURE_UV' in the shader code.
      * @private
      */
-    _getUvSourceExpression(transformPropName, uVPropName, options) {
+    _getUvSourceExpression(transformPropName, uVPropName, options, allowParallaxOffset = true) {
         const transformId = options[transformPropName];
         const uvChannel = options[uVPropName];
         const isMainPass = options.litOptions.pass === SHADER_FORWARD;
@@ -79,8 +91,9 @@ class ShaderGeneratorStandard extends ShaderGenerator {
                 expression = `vUV${uvChannel}_${transformId}`;
             }
 
-            // if heightmap is enabled all maps except the heightmap are offset
-            if (options.heightMap && transformPropName !== 'heightMapTransform') {
+            // if heightmap is enabled all maps except the heightmap are offset. Note that dUvOffset
+            // is only declared and evaluated by the forward pass, so other passes must not use it.
+            if (isMainPass && allowParallaxOffset && options.heightMap && transformPropName !== 'heightMapTransform') {
                 expression += ' + dUvOffset';
             }
         }
@@ -133,16 +146,19 @@ class ShaderGeneratorStandard extends ShaderGenerator {
     /**
      * Add shader defines for a texture map.
      *
-     * @param {Map<string, string>} fDefines - The fragment defines.
+     * @param {Map<string, string|number|boolean>} fDefines - The fragment defines.
      * @param {string} propName - The base name of the map: diffuse | emissive | opacity | light | height | metalness | specular | gloss | ao.
      * @param {string} chunkName - The name of the chunk to use. Usually "basenamePS".
      * @param {object} options - The options passed into createShaderDefinition.
      * @param {Map<string, string>} chunks - The set of shader chunks to choose from.
      * @param {object} mapping - The mapping between chunk and sampler
      * @param {string|null} encoding - The texture's encoding
+     * @param {string|null} samplerName - The name of the texture sampler to use, instead of the
+     * name derived from the map. Used when the texture is not owned by the material, and so must
+     * not share a sampler with the material's own maps.
      * @private
      */
-    _addMapDefines(fDefines, propName, chunkName, options, chunks, mapping, encoding = null) {
+    _addMapDefines(fDefines, propName, chunkName, options, chunks, mapping, encoding = null, samplerName = null) {
         const mapPropName = `${propName}Map`;
         const propNameCaps = propName.toUpperCase();
         const uVPropName = `${mapPropName}Uv`;
@@ -186,24 +202,38 @@ class ShaderGeneratorStandard extends ShaderGenerator {
 
             const uv = this._getUvSourceExpression(transformPropName, uVPropName, options);
 
-            // chunk injection defines
+            // chunk injection defines. Maps which use all channels of the texture, such as the normal
+            // map, have no channel and their chunks do not inject it.
             fDefines.set(`{STD_${propNameCaps}_TEXTURE_UV}`, uv);
-            fDefines.set(`{STD_${propNameCaps}_TEXTURE_CHANNEL}`, options[channelPropName]);
+            const channel = options[channelPropName];
+            if (channel) {
+                fDefines.set(`{STD_${propNameCaps}_TEXTURE_CHANNEL}`, channel);
+            }
 
             // texture sampler define
             const textureId = `{STD_${propNameCaps}_TEXTURE_NAME}`;
             if (chunkCode.includes(textureId)) {
-                let samplerName = `texture_${mapPropName}`;
-                const alias = mapping[textureIdentifier];
-                if (alias) {
-                    samplerName = alias;
-                } else {
-                    mapping[textureIdentifier] = samplerName;
 
-                    // texture is not aliased to existing texture, create a new one
+                let name = samplerName;
+                if (name) {
+
+                    // a sampler supplied by the caller is not one of the material's maps, so it
+                    // takes no part in the sharing of samplers between maps
                     fDefines.set(`STD_${propNameCaps}_TEXTURE_ALLOCATE`, '');
+
+                } else {
+                    name = `texture_${mapPropName}`;
+                    const alias = mapping[textureIdentifier];
+                    if (alias) {
+                        name = alias;
+                    } else {
+                        mapping[textureIdentifier] = name;
+
+                        // texture is not aliased to existing texture, create a new one
+                        fDefines.set(`STD_${propNameCaps}_TEXTURE_ALLOCATE`, '');
+                    }
                 }
-                fDefines.set(textureId, samplerName);
+                fDefines.set(textureId, name);
             }
 
             if (encoding) {
@@ -231,13 +261,14 @@ class ShaderGeneratorStandard extends ShaderGenerator {
     }
 
     _correctChannel(p, chan, _matTex2D) {
-        if (_matTex2D[p] > 0) {
-            if (_matTex2D[p] < chan.length) {
-                return chan.substring(0, _matTex2D[p]);
-            } else if (_matTex2D[p] > chan.length) {
+        const channelCount = _matTex2D.get(p);
+        if (channelCount > 0) {
+            if (channelCount < chan.length) {
+                return chan.substring(0, channelCount);
+            } else if (channelCount > chan.length) {
                 let str = chan;
                 const chr = str.charAt(str.length - 1);
-                const addLen = _matTex2D[p] - str.length;
+                const addLen = channelCount - str.length;
                 for (let i = 0; i < addLen; i++) str += chr;
                 return str;
             }
@@ -250,9 +281,9 @@ class ShaderGeneratorStandard extends ShaderGenerator {
         const useUv = [];
         const useUnmodifiedUv = [];
         const mapTransforms = [];
-        const maxUvSets = 2;
+        const maxUvSets = 8;
 
-        for (const p in _matTex2D) {
+        for (const p of _matTex2D.keys()) {
             const mapName = `${p}Map`;
 
             if (options[`${p}VertexColor`]) {
@@ -293,8 +324,8 @@ class ShaderGeneratorStandard extends ShaderGenerator {
 
     /**
      * @param {StandardMaterialOptions} options - The create options.
-     * @param {Map<string, string>} fDefines - The fragment defines.
-     * @param {ShaderPass} shaderPassInfo - The shader pass info.
+     * @param {Map<string, string|number|boolean>} fDefines - The fragment defines.
+     * @param {ShaderPassInfo} shaderPassInfo - The shader pass info.
      */
     prepareFragmentDefines(options, fDefines, shaderPassInfo) {
 
@@ -308,7 +339,10 @@ class ShaderGeneratorStandard extends ShaderGenerator {
         fDefineSet(options.lightVertexColor, 'STD_LIGHT_VERTEX_COLOR', '');
         fDefineSet(options.dirLightMap && options.litOptions.useSpecular, 'STD_LIGHTMAP_DIR', '');
         fDefineSet(options.heightMap, 'STD_HEIGHT_MAP', '');
+        fDefineSet(true, 'STD_PARALLAX', parallaxNames[options.parallaxMode ?? PARALLAX_OFFSET]);
+        fDefineSet(options.parallaxSelfShadow, 'STD_PARALLAX_SELF_SHADOW', '');
         fDefineSet(options.useSpecularColor, 'STD_SPECULAR_COLOR', '');
+        fDefineSet(options.useSpecularColor && (options.litOptions.useSpecular || options.litOptions.useRefraction), 'STD_SPECULAR_CONSTANT', '');
         fDefineSet(options.aoMap || options.aoVertexColor || options.useAO, 'STD_AO', '');
         fDefineSet(true, 'STD_OPACITY_DITHER', ditherNames[shaderPassInfo.isForward ? options.litOptions.opacityDither : options.litOptions.opacityShadowDither]);
     }
@@ -330,8 +364,6 @@ class ShaderGeneratorStandard extends ShaderGenerator {
         // handle fragment shader
         const textureMapping = {};
 
-        options.litOptions.fresnelModel = (options.litOptions.fresnelModel === 0) ? FRESNEL_SCHLICK : options.litOptions.fresnelModel;
-
         // fragment defines
         const fDefines = litShader.fDefines;
         this.prepareFragmentDefines(options, fDefines, shaderPassInfo);
@@ -351,11 +383,13 @@ class ShaderGeneratorStandard extends ShaderGenerator {
 
             // normal
             if (litShader.needsNormal) {
-                if (options.normalMap || options.clearCoatNormalMap) {
+                if (options.normalMap || options.clearCoatNormalMap || options.heightMap) {
                     if (!options.litOptions.hasTangents) {
+                        // the uv used to derive the TBN matrix. It must not include the parallax
+                        // offset, as the TBN is evaluated before the parallax offset is known.
                         // TODO: generalize to support each normalmap input (normalMap, normalDetailMap, clearCoatNormalMap) independently
-                        const baseName = options.normalMap ? 'normalMap' : 'clearCoatNormalMap';
-                        lightingUv = this._getUvSourceExpression(`${baseName}Transform`, `${baseName}Uv`, options);
+                        const baseName = options.normalMap ? 'normalMap' : (options.clearCoatNormalMap ? 'clearCoatNormalMap' : 'heightMap');
+                        lightingUv = this._getUvSourceExpression(`${baseName}Transform`, `${baseName}Uv`, options, false);
                     }
                 }
 
@@ -369,10 +403,21 @@ class ShaderGeneratorStandard extends ShaderGenerator {
             }
             this._addMapDefines(fDefines, 'diffuse', 'diffusePS', options, litShader.chunks, textureMapping, options.diffuseEncoding);
 
+            // diffuse transmission
+            if (options.litOptions.useDiffuseTransmission) {
+                this._addMapDefines(fDefines, 'diffuseTransmission', 'diffuseTransmissionPS', options, litShader.chunks, textureMapping);
+                this._addMapDefines(fDefines, 'diffuseTransmissionColor', 'diffuseTransmissionColorPS', options, litShader.chunks, textureMapping, options.diffuseTransmissionColorEncoding);
+            }
+
             // refraction
             if (options.litOptions.useRefraction) {
                 this._addMapDefines(fDefines, 'refraction', 'transmissionPS', options, litShader.chunks, textureMapping);
                 this._addMapDefines(fDefines, 'thickness', 'thicknessPS', options, litShader.chunks, textureMapping);
+
+                // refraction needs ior, which is otherwise handled by the metalness path
+                if (!options.litOptions.useMetalness) {
+                    this._addMapDefines(fDefines, 'ior', 'iorPS', options, litShader.chunks, textureMapping);
+                }
             }
 
             // iridescence
@@ -381,8 +426,8 @@ class ShaderGeneratorStandard extends ShaderGenerator {
                 this._addMapDefines(fDefines, 'iridescenceThickness', 'iridescenceThicknessPS', options, litShader.chunks, textureMapping);
             }
 
-            // specularity & glossiness
-            if ((litShader.lighting && options.litOptions.useSpecular) || litShader.reflections) {
+            // specularity & glossiness (also needed by refraction, which uses specularity and gloss)
+            if ((litShader.lighting && options.litOptions.useSpecular) || litShader.reflections || options.litOptions.useRefraction) {
                 if (options.litOptions.useSheen) {
                     this._addMapDefines(fDefines, 'sheen', 'sheenPS', options, litShader.chunks, textureMapping, options.sheenEncoding);
                     this._addMapDefines(fDefines, 'sheenGloss', 'sheenGlossPS', options, litShader.chunks, textureMapping);
@@ -427,9 +472,11 @@ class ShaderGeneratorStandard extends ShaderGenerator {
                 this._addMapDefines(fDefines, 'anisotropy', 'anisotropyPS', options, litShader.chunks, textureMapping);
             }
 
-            // lightmap
+            // lightmap - the mesh instance supplies it in its own sampler, as the material may
+            // have a lightmap of its own assigned to the material sampler
             if (options.lightMap || options.lightVertexColor) {
-                this._addMapDefines(fDefines, 'light', 'lightmapPS', options, litShader.chunks, textureMapping, options.lightMapEncoding);
+                const samplerName = options.useInstanceLightMap ? instanceLightmapUniformNames[0] : null;
+                this._addMapDefines(fDefines, 'light', 'lightmapPS', options, litShader.chunks, textureMapping, options.lightMapEncoding, samplerName);
             }
 
         } else {
@@ -461,7 +508,8 @@ class ShaderGeneratorStandard extends ShaderGenerator {
             vertexIncludes: includes,
             fragmentIncludes: includes,
             fragmentDefines: fDefines,
-            vertexDefines: vDefines
+            vertexDefines: vDefines,
+            useDualSourceBlending: options.useDualSourceBlending
         });
 
         if (litShader.shaderPassInfo.isForward) {

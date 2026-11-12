@@ -61,6 +61,7 @@ import { XrManager } from './xr/xr-manager.js';
  * @import { GraphicsDevice } from '../platform/graphics/graphics-device.js'
  * @import { Keyboard } from '../platform/input/keyboard.js'
  * @import { Mouse } from '../platform/input/mouse.js'
+ * @import { PhysicsWorld } from './physics/physics-world.js'
  * @import { TouchDevice } from '../platform/input/touch-device.js'
  */
 
@@ -70,6 +71,40 @@ import { XrManager } from './xr/xr-manager.js';
  * {@link ComponentSystem}s and {@link ResourceHandler}s implemented in the PlayCanvas Engine. This
  * makes app setup simple but results in the full engine being included when bundling your
  * application.
+ *
+ * New code should prefer {@link AppBase}, as this class is expected to be deprecated in a future
+ * release. Two limitations motivate that:
+ *
+ * - Its constructor is synchronous, so it cannot create a WebGPU device. Creating one requires
+ * awaiting {@link createGraphicsDevice}.
+ * - It references every component system and resource handler, so none of them can be
+ * [tree-shaken](https://developer.mozilla.org/en-US/docs/Glossary/Tree_shaking) out of your
+ * bundle. {@link AppBase} leaves that choice to you.
+ *
+ * The equivalent {@link AppBase} setup registers only what the app actually uses:
+ *
+ * ```javascript
+ * const device = await createGraphicsDevice(canvas, { deviceTypes: [DEVICETYPE_WEBGPU] });
+ *
+ * const options = new AppOptions();
+ * options.graphicsDevice = device;
+ * options.componentSystems = [RenderComponentSystem, CameraComponentSystem, LightComponentSystem];
+ * options.resourceHandlers = [TextureHandler, ContainerHandler];
+ *
+ * const app = new AppBase(canvas);
+ * app.init(options);
+ * ```
+ *
+ * The component systems this class registers are listed on the constructor below. That list
+ * doubles as a migration checklist, as it maps each component name to the system you would need
+ * to register yourself.
+ *
+ * {@link AppBase#keyboard}, {@link AppBase#mouse}, {@link AppBase#touch},
+ * {@link AppBase#gamepads} and {@link AppBase#elementInput} stay `null` unless the matching device
+ * is passed to this constructor, so a game that reads input must construct with, for example,
+ * `{ keyboard: new Keyboard(window), mouse: new Mouse(canvas), touch: new TouchDevice(canvas) }`.
+ *
+ * @category Framework
  */
 class Application extends AppBase {
     /**
@@ -84,6 +119,8 @@ class Application extends AppBase {
      * - camera ({@link CameraComponentSystem})
      * - collision ({@link CollisionComponentSystem})
      * - element ({@link ElementComponentSystem})
+     * - gsplat ({@link GSplatComponentSystem})
+     * - joint ({@link JointComponentSystem})
      * - layoutchild ({@link LayoutChildComponentSystem})
      * - layoutgroup ({@link LayoutGroupComponentSystem})
      * - light ({@link LightComponentSystem})
@@ -112,9 +149,15 @@ class Application extends AppBase {
      * @param {object} [options.graphicsDeviceOptions] - Options object that is passed into the
      * {@link GraphicsDevice} constructor.
      * @param {string[]} [options.scriptsOrder] - Scripts in order of loading first.
+     * @param {PhysicsWorld} [options.physicsWorld] - The physics backend used to simulate rigid
+     * bodies, collisions and joints. When omitted, the Ammo.js backend is created automatically if
+     * the Ammo library is loaded. See {@link AppOptions#physicsWorld}.
+     * @param {boolean} [options.devtools] - Whether the app announces itself to developer tools,
+     * such as the PlayCanvas Inspector browser extension. Defaults to true. See
+     * {@link AppOptions#devtools}.
      * @example
      * // Engine-only example: create the application manually
-     * const app = new pc.Application(canvas, options);
+     * const app = new Application(canvas, options);
      *
      * // Start the application's main loop
      * app.start();
@@ -138,6 +181,9 @@ class Application extends AppBase {
         appOptions.assetPrefix = options.assetPrefix;
         appOptions.scriptsOrder = options.scriptsOrder;
 
+        appOptions.physicsWorld = options.physicsWorld;
+        appOptions.devtools = options.devtools ?? true;
+
         appOptions.soundManager = new SoundManager();
         appOptions.lightmapper = Lightmapper;
         appOptions.batchManager = BatchManager;
@@ -154,6 +200,9 @@ class Application extends AppBase {
         if (platform.browser && !!navigator.xr) {
             options.graphicsDeviceOptions.xrCompatible = true;
         }
+        // note this defaults alpha to false, unlike GraphicsDevice and createGraphicsDevice,
+        // which default it to true. Kept for backwards compatibility - changing it would make
+        // existing canvases composite with the page.
         options.graphicsDeviceOptions.alpha = options.graphicsDeviceOptions.alpha || false;
 
         return new WebglGraphicsDevice(canvas, options.graphicsDeviceOptions);

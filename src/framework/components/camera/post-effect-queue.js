@@ -1,3 +1,4 @@
+import { Debug } from '../../../core/debug.js';
 import { PIXELFORMAT_RGBA16F, PIXELFORMAT_RGBA32F, PIXELFORMAT_RGBA8, PIXELFORMAT_SRGBA8 } from '../../../platform/graphics/constants.js';
 import { DebugGraphics } from '../../../platform/graphics/debug-graphics.js';
 import { RenderTarget } from '../../../platform/graphics/render-target.js';
@@ -20,8 +21,13 @@ class PostEffectEntry {
 }
 
 /**
- * Used to manage multiple post effects for a camera.
+ * Used to manage multiple post effects for a camera. This is the legacy post-processing path. For
+ * new work use {@link CameraFrame}, which implements bloom, SSAO, depth of field, TAA, volumetric
+ * fog and tone mapping as one HDR pipeline; `playcanvas/scripts/esm/camera-frame.mjs` wraps it as
+ * an attachable script.
  *
+ * @deprecated Use {@link CameraFrame} instead.
+ * @ignore
  * @category Graphics
  */
 class PostEffectQueue {
@@ -140,6 +146,8 @@ class PostEffectQueue {
      * @param {PostEffect} effect - The post effect to add to the queue.
      */
     addEffect(effect) {
+        Debug.deprecated('Post effects added to CameraComponent#postEffects are deprecated. Use CameraFrame instead, see https://developer.playcanvas.com/user-manual/graphics/posteffects/');
+
         // first rendering of the scene requires depth buffer
         const effects = this.effects;
         const isFirstEffect = effects.length === 0;

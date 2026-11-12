@@ -201,6 +201,19 @@ class GSplatFrustumCuller {
     }
 
     /**
+     * Stores the planes of the given frustum in {@link frustumPlanes} for use by the interval
+     * cull compute shader.
+     *
+     * @param {Frustum} frustum - The frustum to take the planes from.
+     */
+    setFrustumPlanes(frustum) {
+        // the frustum stores its planes in the packed vec4(normal.xyz, distance) form the shader
+        // wants, so this is a straight copy. A copy rather than sharing the frustum's array, as the
+        // caller may be using a shared scratch frustum which is overwritten by the next call.
+        this.frustumPlanes.set(frustum.planeData);
+    }
+
+    /**
      * Computes frustum planes from camera matrices and stores them in
      * {@link frustumPlanes} for use by the interval cull compute shader.
      *
@@ -210,14 +223,7 @@ class GSplatFrustumCuller {
     computeFrustumPlanes(projectionMatrix, viewMatrix) {
         _viewProjMat.mul2(projectionMatrix, viewMatrix);
         _frustum.setFromMat4(_viewProjMat);
-        const planes = this.frustumPlanes;
-        for (let p = 0; p < 6; p++) {
-            const plane = _frustum.planes[p];
-            planes[p * 4 + 0] = plane.normal.x;
-            planes[p * 4 + 1] = plane.normal.y;
-            planes[p * 4 + 2] = plane.normal.z;
-            planes[p * 4 + 3] = plane.distance;
-        }
+        this.setFrustumPlanes(_frustum);
     }
 
     /**

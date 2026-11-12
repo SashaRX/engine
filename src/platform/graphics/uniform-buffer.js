@@ -11,6 +11,7 @@ import { DynamicBufferAllocation } from './dynamic-buffers.js';
 
 /**
  * @import { DynamicBindGroup } from './bind-group.js'
+ * @import { DynamicBuffer } from './dynamic-buffer.js'
  * @import { GraphicsDevice } from './graphics-device.js'
  * @import { UniformBufferFormat } from './uniform-buffer-format.js'
  * @import { UniformFormat } from './uniform-buffer-format.js'
@@ -226,10 +227,13 @@ class UniformBuffer {
     storageUint32;
 
     /**
-     * A render version used to track the last time the properties requiring bind group to be
-     * updated were changed.
+     * Where this uniform buffer's data starts in the storage views, in 4 byte elements. Zero for a
+     * persistent buffer, which owns its storage, and the offset of the allocation for a
+     * non-persistent one, which borrows the storage of a dynamic buffer.
+     *
+     * @type {number}
      */
-    renderVersionDirty = 0;
+    storageOffset = 0;
 
     /**
      * Create a new UniformBuffer instance.
@@ -254,8 +258,9 @@ class UniformBuffer {
 
             graphicsDevice._vram.ub += this.format.byteSize;
 
-            // TODO: register with the device and handle lost context
-            // this.device.buffers.push(this);
+            // register with the device so the GPU buffer is recreated and re-uploaded on a lost
+            // context (non-persistent buffers re-allocate from the dynamic buffers on next update)
+            this.device.buffers.add(this);
         } else {
 
             this.allocation = new DynamicBufferAllocation();
@@ -268,9 +273,10 @@ class UniformBuffer {
     destroy() {
 
         if (this.persistent) {
-            // stop tracking the vertex buffer
-            // TODO: remove the buffer from the list on the device (lost context handling)
             const device = this.device;
+
+            // stop tracking the buffer for lost context handling
+            device.buffers.delete(this);
 
             this.impl.destroy(device);
 
@@ -283,7 +289,8 @@ class UniformBuffer {
     }
 
     /**
-     * Assign a storage to this uniform buffer.
+     * Assign the storage a persistent uniform buffer owns. This runs once per buffer, unlike
+     * {@link UniformBuffer#assignDynamicStorage}.
      *
      * @param {Int32Array} storage - The storage to assign to this uniform buffer.
      */
@@ -291,6 +298,22 @@ class UniformBuffer {
         this.storageInt32 = storage;
         this.storageUint32 = new Uint32Array(storage.buffer, storage.byteOffset, storage.byteLength / 4);
         this.storageFloat32 = new Float32Array(storage.buffer, storage.byteOffset, storage.byteLength / 4);
+        this.storageOffset = 0;
+    }
+
+    /**
+     * Borrow the storage views of the dynamic buffer this uniform buffer was allocated from, and
+     * remember where in them its own data starts. The views span the whole dynamic buffer, so this
+     * creates none of its own - it runs for every draw that updates a non-persistent buffer.
+     *
+     * @param {DynamicBuffer} dynamicBuffer - The buffer the allocation came from.
+     * @param {number} storageOffset - Where the allocation starts in the views, in 4 byte elements.
+     */
+    assignDynamicStorage(dynamicBuffer, storageOffset) {
+        this.storageInt32 = dynamicBuffer.storageInt32;
+        this.storageUint32 = dynamicBuffer.storageUint32;
+        this.storageFloat32 = dynamicBuffer.storageFloat32;
+        this.storageOffset = storageOffset;
     }
 
     /**
@@ -298,6 +321,15 @@ class UniformBuffer {
      */
     loseContext() {
         this.impl?.loseContext();
+    }
+
+    /**
+     * Called when the rendering context is restored. Recreates the GPU buffer and re-uploads the
+     * data from the persistent CPU storage. Only persistent uniform buffers are tracked for context
+     * loss; non-persistent ones are re-allocated from the dynamic buffers on their next update.
+     */
+    restoreContext() {
+        this.impl?.unlock(this);
     }
 
     /**
@@ -309,7 +341,7 @@ class UniformBuffer {
      */
     setUniform(uniformFormat, value) {
         Debug.assert(uniformFormat);
-        const offset = uniformFormat.offset;
+        const offset = uniformFormat.offset + this.storageOffset;
 
         if (value !== null && value !== undefined) {
 
@@ -317,6 +349,12 @@ class UniformBuffer {
             if (updateFunction) {
                 updateFunction(this, value, offset, uniformFormat.count);
             } else {
+
+                // the storage spans more than this uniform buffer, so a value longer than the
+                // uniform would overwrite what follows it instead of being rejected
+                Debug.assert(value.length <= uniformFormat.byteSize / 4,
+                    `Value assigned to uniform [${uniformFormat.name}] is longer than the uniform while rendering ${DebugGraphics.toString()}`);
+
                 this.storageFloat32.set(value, offset);
             }
         } else {
@@ -345,19 +383,13 @@ class UniformBuffer {
 
             // allocate memory from dynamic buffer for this frame
             const allocation = this.allocation;
-            const oldGpuBuffer = allocation.gpuBuffer;
             this.device.dynamicBuffers.alloc(allocation, this.format.byteSize);
-            this.assignStorage(allocation.storage);
+            this.assignDynamicStorage(allocation.storageBuffer, allocation.storageOffset);
 
             // get info about bind group we can use for this non-persistent UB for this frame
             if (dynamicBindGroup) {
                 dynamicBindGroup.bindGroup = allocation.gpuBuffer.getBindGroup(this);
                 dynamicBindGroup.offsets[0] = allocation.offset;
-            }
-
-            // buffer has changed, update the render version to force bind group to be updated
-            if (oldGpuBuffer !== allocation.gpuBuffer) {
-                this.renderVersionDirty = this.device.renderVersion;
             }
         }
     }
@@ -368,9 +400,29 @@ class UniformBuffer {
             // Upload the new data
             this.impl.unlock(this);
         } else {
-            this.storageFloat32 = null;
+            // upload the data to the dynamic buffer - a no-op on backends that copy it separately
+            // (WebGPU), but WebGL uploads eagerly here
+            this.allocation.gpuBuffer.upload();
+
+            // the storage belongs to the dynamic buffer, and writing to it outside of an update
+            // would write to whatever it hands out next
             this.storageInt32 = null;
+            this.storageUint32 = null;
+            this.storageFloat32 = null;
+            this.storageOffset = 0;
         }
+    }
+
+    /**
+     * Uploads the storage of a persistent uniform buffer to the GPU. Use this after writing to
+     * the storage directly, instead of {@link UniformBuffer#update} which reads the values from
+     * the scope.
+     *
+     * @ignore
+     */
+    upload() {
+        Debug.assert(this.persistent, 'UniformBuffer#upload is only valid for a persistent uniform buffer.');
+        this.impl.unlock(this);
     }
 
     /**

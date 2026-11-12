@@ -18,7 +18,8 @@ let ids = 0;
  */
 class XrPlane extends EventHandler {
     /**
-     * Fired when an {@link XrPlane} is removed.
+     * Fired when an {@link XrPlane} is removed. Its attributes, such as its points and label, keep
+     * their last values.
      *
      * @event
      * @example
@@ -64,11 +65,8 @@ class XrPlane extends EventHandler {
      */
     _lastChangedTime;
 
-    /**
-     * @type {"horizontal"|"vertical"|null}
-     * @private
-     */
-    _orientation;
+    /** @private */
+    _destroyed = false;
 
     /** @private */
     _position = new Vec3();
@@ -90,13 +88,14 @@ class XrPlane extends EventHandler {
         this._planeDetection = planeDetection;
         this._xrPlane = xrPlane;
         this._lastChangedTime = xrPlane.lastChangedTime;
-        this._orientation = xrPlane.orientation;
     }
 
     /** @ignore */
     destroy() {
-        if (!this._xrPlane) return;
-        this._xrPlane = null;
+        if (this._destroyed) return;
+
+        // the XRPlane is kept, so the attributes of the plane stay readable once it is removed
+        this._destroyed = true;
         this.fire('remove');
     }
 
@@ -164,7 +163,7 @@ class XrPlane extends EventHandler {
      * }
      */
     get orientation() {
-        return this._orientation;
+        return this._xrPlane.orientation;
     }
 
     /**
@@ -176,12 +175,12 @@ class XrPlane extends EventHandler {
      * @type {DOMPointReadOnly[]}
      * @example
      * // prepare reusable objects
-     * const transform = new pc.Mat4();
-     * const vecA = new pc.Vec3();
-     * const vecB = new pc.Vec3();
+     * const transform = new Mat4();
+     * const vecA = new Vec3();
+     * const vecB = new Vec3();
      *
      * // update Mat4 to plane position and rotation
-     * transform.setTRS(plane.getPosition(), plane.getRotation(), pc.Vec3.ONE);
+     * transform.setTRS(plane.getPosition(), plane.getRotation(), Vec3.ONE);
      *
      * // draw lines between points
      * for (let i = 0; i < plane.points.length; i++) {
@@ -193,7 +192,7 @@ class XrPlane extends EventHandler {
      *     transform.transformPoint(vecB, vecB);
      *
      *     // render line
-     *     app.drawLine(vecA, vecB, pc.Color.WHITE);
+     *     app.drawLine(vecA, vecB, Color.WHITE);
      * }
      */
     get points() {

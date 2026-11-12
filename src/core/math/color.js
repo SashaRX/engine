@@ -1,44 +1,38 @@
 import { math } from './math.js';
 
+// The sRGB transfer functions (IEC 61966-2-1), which GPUs apply when they sample an sRGB texture
+// or write an sRGB render target, so a color converted here matches theirs exactly
+const srgbToLinear = c => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+const linearToSrgb = c => (c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055);
+
 /**
  * An RGBA color.
  *
  * Each color component is a floating point value in the range 0 to 1. The {@link r} (red),
  * {@link g} (green) and {@link b} (blue) components define a color in RGB color space. The
- * {@link a} (alpha) component defines transparency. An alpha of 1 is fully opaque. An alpha of
- * 0 is fully transparent.
+ * {@link a} (alpha) component defines transparency. An alpha of 1 is fully opaque. An alpha of 0 is
+ * fully transparent.
  *
+ * A Color stores the values it is given and does not track whether they are in linear or gamma
+ * (sRGB) space. Convert explicitly with {@link linear} and {@link gamma} when a value crosses that
+ * boundary. {@link fromString} and {@link toString} exchange colors with the `#RRGGBB` and
+ * `#RRGGBBAA` notation used by CSS, and {@link lerp} blends two colors.
+ *
+ * Methods modify the color they are called on and return it for chaining. Use {@link clone} for an
+ * independent copy and {@link copy} to overwrite. The named constants such as {@link WHITE} and
+ * {@link RED} are frozen shared instances, so copy one before modifying it.
+ *
+ * @example
+ * // Set a material color from a CSS hex string
+ * material.diffuse.fromString('#ff8800');
+ * material.update();
+ * @example
+ * // Fade between two colors without allocating
+ * const tint = new Color();
+ * tint.lerp(Color.RED, Color.BLUE, t);
  * @category Math
  */
 class Color {
-    /**
-     * The red component of the color.
-     *
-     * @type {number}
-     */
-    r;
-
-    /**
-     * The green component of the color.
-     *
-     * @type {number}
-     */
-    g;
-
-    /**
-     * The blue component of the color.
-     *
-     * @type {number}
-     */
-    b;
-
-    /**
-     * The alpha component of the color.
-     *
-     * @type {number}
-     */
-    a;
-
     /**
      * Creates a new Color instance.
      *
@@ -48,8 +42,8 @@ class Color {
      * @param {number} [b] - The b value. Defaults to 0.
      * @param {number} [a] - The a value. Defaults to 1.
      * @example
-     * const c1 = new pc.Color(); // defaults to 0, 0, 0, 1
-     * const c2 = new pc.Color(0.1, 0.2, 0.3, 0.4);
+     * const c1 = new Color(); // defaults to 0, 0, 0, 1
+     * const c2 = new Color(0.1, 0.2, 0.3, 0.4);
      */
     /**
      * Creates a new Color instance.
@@ -57,7 +51,7 @@ class Color {
      * @overload
      * @param {number[]} arr - The array to set the color values from.
      * @example
-     * const c = new pc.Color([0.1, 0.2, 0.3, 0.4]);
+     * const c = new Color([0.1, 0.2, 0.3, 0.4]);
      */
     /**
      * @param {number|number[]} [r] - The r value. Defaults to 0. If r is an array of length 3 or
@@ -69,16 +63,43 @@ class Color {
     constructor(r = 0, g = 0, b = 0, a = 1) {
         const length = r.length;
         if (length === 3 || length === 4) {
-            this.r = r[0];
-            this.g = r[1];
-            this.b = r[2];
-            this.a = r[3] ?? 1;
-        } else {
-            this.r = r;
-            this.g = g;
-            this.b = b;
-            this.a = a;
+            a = r[3] ?? 1;
+            b = r[2];
+            g = r[1];
+            r = r[0];
         }
+
+        // Fields are assigned once here instead of declared as class fields. A declaration without
+        // an initializer stores undefined first, so V8 never unboxes the field as a double and
+        // every fractional write allocates a heap number.
+
+        /**
+         * The red component of the color.
+         *
+         * @type {number}
+         */
+        this.r = r;
+
+        /**
+         * The green component of the color.
+         *
+         * @type {number}
+         */
+        this.g = g;
+
+        /**
+         * The blue component of the color.
+         *
+         * @type {number}
+         */
+        this.b = b;
+
+        /**
+         * The alpha component of the color.
+         *
+         * @type {number}
+         */
+        this.a = a;
     }
 
     /**
@@ -86,7 +107,7 @@ class Color {
      *
      * @returns {this} A duplicate color object.
      * @example
-     * const c = new pc.Color(1, 0, 0, 1);
+     * const c = new Color(1, 0, 0, 1);
      * const cClone = c.clone();
      * // cClone is [1, 0, 0, 1]
      */
@@ -102,8 +123,8 @@ class Color {
      * @param {Color} rhs - A color to copy to the specified color.
      * @returns {Color} Self for chaining.
      * @example
-     * const src = new pc.Color(1, 0, 0, 1);
-     * const dst = new pc.Color();
+     * const src = new Color(1, 0, 0, 1);
+     * const dst = new Color();
      *
      * dst.copy(src);
      *
@@ -124,8 +145,8 @@ class Color {
      * @param {Color} rhs - The color to compare to the specified color.
      * @returns {boolean} True if the colors are equal and false otherwise.
      * @example
-     * const a = new pc.Color(1, 0, 0, 1);
-     * const b = new pc.Color(1, 1, 0, 1);
+     * const a = new Color(1, 0, 0, 1);
+     * const b = new Color(1, 1, 0, 1);
      * console.log("The two colors are " + (a.equals(b) ? "equal" : "different"));
      */
     equals(rhs) {
@@ -141,7 +162,7 @@ class Color {
      * @param {number} [a] - The value for the alpha (0-1), defaults to 1.
      * @returns {Color} Self for chaining.
      * @example
-     * const c = new pc.Color();
+     * const c = new Color();
      * c.set(1, 0, 0, 1);
      * // c is now red [1, 0, 0, 1]
      */
@@ -164,9 +185,9 @@ class Color {
      * range, the linear interpolant will occur on a ray extrapolated from this line.
      * @returns {Color} Self for chaining.
      * @example
-     * const a = new pc.Color(0, 0, 0);
-     * const b = new pc.Color(1, 1, 0.5);
-     * const r = new pc.Color();
+     * const a = new Color(0, 0, 0);
+     * const b = new Color(1, 1, 0.5);
+     * const r = new Color();
      *
      * r.lerp(a, b, 0);   // r is equal to a
      * r.lerp(a, b, 0.5); // r is 0.5, 0.5, 0.25
@@ -182,39 +203,41 @@ class Color {
     }
 
     /**
-     * Converts the color from gamma to linear color space.
+     * Converts the color from gamma (sRGB) to linear color space, using the exact sRGB transfer
+     * function. Alpha is left unchanged.
      *
      * @param {Color} [src] - The color to convert to linear color space. If not set, the operation
      * is done in place.
      * @returns {Color} Self for chaining.
      * @example
-     * const c = new pc.Color(0.5, 0.5, 0.5, 1);
+     * const c = new Color(0.5, 0.5, 0.5, 1);
      * c.linear();
-     * // c is now approximately [0.218, 0.218, 0.218, 1]
+     * // c is now approximately [0.214, 0.214, 0.214, 1]
      */
     linear(src = this) {
-        this.r = Math.pow(src.r, 2.2);
-        this.g = Math.pow(src.g, 2.2);
-        this.b = Math.pow(src.b, 2.2);
+        this.r = srgbToLinear(src.r);
+        this.g = srgbToLinear(src.g);
+        this.b = srgbToLinear(src.b);
         this.a = src.a;
         return this;
     }
 
     /**
-     * Converts the color from linear to gamma color space.
+     * Converts the color from linear to gamma (sRGB) color space, using the exact sRGB transfer
+     * function. Alpha is left unchanged.
      *
      * @param {Color} [src] - The color to convert to gamma color space. If not set, the operation is
      * done in place.
      * @returns {Color} Self for chaining.
      * @example
-     * const c = new pc.Color(0.218, 0.218, 0.218, 1);
+     * const c = new Color(0.214, 0.214, 0.214, 1);
      * c.gamma();
      * // c is now approximately [0.5, 0.5, 0.5, 1]
      */
     gamma(src = this) {
-        this.r = Math.pow(src.r, 1 / 2.2);
-        this.g = Math.pow(src.g, 1 / 2.2);
-        this.b = Math.pow(src.b, 1 / 2.2);
+        this.r = linearToSrgb(src.r);
+        this.g = linearToSrgb(src.g);
+        this.b = linearToSrgb(src.b);
         this.a = src.a;
         return this;
     }
@@ -225,7 +248,7 @@ class Color {
      * @param {number} scalar - The number to multiply by.
      * @returns {Color} Self for chaining.
      * @example
-     * const c = new pc.Color(0.2, 0.4, 0.6, 1);
+     * const c = new Color(0.2, 0.4, 0.6, 1);
      * c.mulScalar(2);
      * // c is now [0.4, 0.8, 1.2, 1]
      */
@@ -244,7 +267,7 @@ class Color {
      * HTML/CSS.
      * @returns {Color} Self for chaining.
      * @example
-     * const c = new pc.Color();
+     * const c = new Color();
      * c.fromString('#ff0000');
      * // c is now [1, 0, 0, 1]
      */
@@ -271,7 +294,7 @@ class Color {
      * array. Default is 0.
      * @returns {Color} Self for chaining.
      * @example
-     * const c = new pc.Color();
+     * const c = new Color();
      * c.fromArray([1, 0, 1, 1]);
      * // c is set to [1, 0, 1, 1]
      */
@@ -293,7 +316,7 @@ class Color {
      * @param {boolean} [asArray] - If true, the output will be an array of numbers. Defaults to false.
      * @returns {string} The color in string form.
      * @example
-     * const c = new pc.Color(1, 1, 1);
+     * const c = new Color(1, 1, 1);
      * // Outputs #ffffff
      * console.log(c.toString());
      */
@@ -344,7 +367,7 @@ class Color {
      * @param {boolean} [alpha] - If true, the output array will include the alpha value.
      * @returns {number[]|ArrayBufferView} The color as an array.
      * @example
-     * const c = new pc.Color(1, 1, 1);
+     * const c = new Color(1, 1, 1);
      * // Outputs [1, 1, 1, 1]
      * console.log(c.toArray());
      */

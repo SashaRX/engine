@@ -5,7 +5,7 @@ uniform material_attenuation: vec3f;
 fn evalRefractionColor(refractionVector: vec3f, gloss: f32, refractionIndex: f32) -> vec3f {
 
     // The refraction point is the entry point + vector to exit point
-    let pointOfRefraction: vec4f = vec4f(vPositionW + refractionVector, 1.0);
+    let pointOfRefraction: vec4f = vec4f(litArgs_worldPosition + refractionVector, 1.0);
 
     // Project to texture space so we can sample it
     let projectionPoint: vec4f = uniform.matrix_viewProjection * pointOfRefraction;
@@ -15,7 +15,7 @@ fn evalRefractionColor(refractionVector: vec3f, gloss: f32, refractionIndex: f32
 
     // Use IOR and roughness to select mip
     let iorToRoughness: f32 = (1.0 - gloss) * clamp((1.0 / refractionIndex) * 2.0 - 2.0, 0.0, 1.0);
-    let refractionLod: f32 = log2(uniform.uScreenSize.x) * iorToRoughness;
+    let refractionLod: f32 = log2(uniform.screen_size.x) * iorToRoughness;
     var refraction: vec3f = textureSampleLevel(uSceneColorMap, uSceneColorMapSampler, uv, refractionLod).rgb;
 
     // Convert from gamma to linear space if needed
@@ -42,14 +42,9 @@ fn addRefraction(
 #endif
 ) {
 
-    // Extract scale from the model transform
-    var modelScale: vec3f;
-    modelScale.x = length(uniform.matrix_model[0].xyz);
-    modelScale.y = length(uniform.matrix_model[1].xyz);
-    modelScale.z = length(uniform.matrix_model[2].xyz);
-
-    // Calculate the refraction vector, scaled by the thickness and scale of the object
-    let scale: vec3f = thickness * modelScale;
+    // Calculate the refraction vector, scaled by the thickness and the scale of the model matrix,
+    // passed from the vertex shader
+    let scale: vec3f = thickness * vModelScale;
     var refractionVector = normalize(refract(-viewDir, worldNormal, refractionIndex)) * scale;
     var refraction = evalRefractionColor(refractionVector, gloss, refractionIndex);
 

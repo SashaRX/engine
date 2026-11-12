@@ -3,6 +3,10 @@ import { Tracing } from './tracing.js';
 /**
  * Engine debug log system. Note that the logging only executes in the debug build of the engine,
  * and is stripped out in other builds.
+ *
+ * The debug build ships in the npm package: import from `'playcanvas/debug'` instead of
+ * `'playcanvas'` to enable assertions, deprecation notices and validation warnings. A
+ * `'playcanvas/profiler'` build is also available for per-frame timings.
  */
 class Debug {
     /**
@@ -40,7 +44,7 @@ class Debug {
     /**
      * Assertion deprecated message. If the assertion is false, the deprecated message is written to the log.
      *
-     * @param {boolean|object} assertion - The assertion to check.
+     * @param {*} assertion - The assertion to check. Any falsy value fails.
      * @param {string} message - The message to log.
      */
     static assertDeprecated(assertion, message) {
@@ -52,7 +56,7 @@ class Debug {
     /**
      * Assertion error message. If the assertion is false, the error message is written to the log.
      *
-     * @param {boolean|object} assertion - The assertion to check.
+     * @param {*} assertion - The assertion to check. Any falsy value fails.
      * @param {...*} args - The values to be written to the log.
      */
     static assert(assertion, ...args) {

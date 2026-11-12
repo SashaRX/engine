@@ -18,6 +18,7 @@ class WebgpuGpuProfiler extends GpuProfiler {
     }
 
     destroy() {
+        this.invalidateTimings();
         this.timestampQueriesSet?.destroy();
         this.timestampQueriesSet = null;
     }
@@ -38,7 +39,10 @@ class WebgpuGpuProfiler extends GpuProfiler {
             // request results
             const renderVersion = this.device.renderVersion;
             this.timestampQueriesSet?.request(this.slotCount, renderVersion).then((results) => {
-                this.report(results.renderVersion, results.timings);
+                // no results are returned when the device is lost
+                if (results) {
+                    this.report(results.renderVersion, results.timings, results.frameTime);
+                }
             });
 
             super.request(renderVersion);

@@ -6,6 +6,10 @@ export default /* wgsl */`
         uniform animTexIndexParams: vec2f;
     #endif
 
+    #ifdef SCREEN_SPACE
+        uniform viewport_size: vec4f; // viewport width, height, 1/width, 1/height
+    #endif
+
     #if NORMAL == MAP
         varying ParticleMat0: vec3f;
         varying ParticleMat1: vec3f;
@@ -24,11 +28,7 @@ export default /* wgsl */`
 
         #include "particle_initVS"
 
-        #ifdef PACK8
-            #include "particleInputRgba8PS"     // why are these PS and not VS?
-        #else
-            #include  "particleInputFloatPS"    // why are these PS and not VS?
-        #endif
+        #include "particleInputPS"
 
         #ifdef SOFT
             #include "screenDepthPS"

@@ -14,6 +14,7 @@ import blurVSMPS from '../chunks/lit/frag/blurVSM.js';
 import clearCoatPS from '../chunks/standard/frag/clearCoat.js';
 import clearCoatGlossPS from '../chunks/standard/frag/clearCoatGloss.js';
 import clearCoatNormalPS from '../chunks/standard/frag/clearCoatNormal.js';
+import clipPlanesPS from '../chunks/common/frag/clipPlanes.js';
 import clusteredLightUtilsPS from '../chunks/lit/frag/clusteredLightUtils.js';
 import clusteredLightCookiesPS from '../chunks/lit/frag/clusteredLightCookies.js';
 import clusteredLightShadowsPS from '../chunks/lit/frag/clusteredLightShadows.js';
@@ -30,6 +31,8 @@ import debugProcessFrontendPS from '../chunks/lit/frag/debug-process-frontend.js
 import decodePS from '../chunks/common/frag/decode.js';
 import detailModesPS from '../chunks/standard/frag/detailModes.js';
 import diffusePS from '../chunks/standard/frag/diffuse.js';
+import diffuseTransmissionPS from '../chunks/standard/frag/diffuseTransmission.js';
+import diffuseTransmissionColorPS from '../chunks/standard/frag/diffuseTransmissionColor.js';
 import emissivePS from '../chunks/standard/frag/emissive.js';
 import encodePS from '../chunks/common/frag/encode.js';
 import endPS from '../chunks/lit/frag/end.js';
@@ -37,7 +40,9 @@ import envAtlasPS from '../chunks/common/frag/envAtlas.js';
 import envProcPS from '../chunks/common/frag/envProc.js';
 import falloffInvSquaredPS from '../chunks/lit/frag/falloffInvSquared.js';
 import falloffLinearPS from '../chunks/lit/frag/falloffLinear.js';
+import flatNormalPS from '../chunks/common/frag/flat-normal.js';
 import floatAsUintPS from '../chunks/common/frag/float-as-uint.js';
+import sceneTexturesPS from '../chunks/common/frag/scene-textures.js';
 import fogPS from '../chunks/common/frag/fog.js';
 import fogMathPS from '../chunks/common/shared/fogMath.js';
 import fresnelSchlickPS from '../chunks/lit/frag/fresnelSchlick.js';
@@ -78,6 +83,7 @@ import litShaderArgsPS from '../chunks/standard/frag/litShaderArgs.js';
 import litShaderCorePS from '../chunks/standard/frag/litShaderCore.js';
 import litShadowMainPS from '../chunks/lit/frag/pass-shadow/litShadowMain.js';
 import ltcPS from '../chunks/lit/frag/ltc.js';
+import meshInstanceStorageVS from '../chunks/common/vert/meshInstanceStorage.js';
 import metalnessPS from '../chunks/standard/frag/metalness.js';
 import msdfPS from '../chunks/common/frag/msdf.js';
 import metalnessModulatePS from '../chunks/lit/frag/metalnessModulate.js';
@@ -89,6 +95,8 @@ import normalCoreVS from '../chunks/common/vert/normalCore.js';
 import normalMapPS from '../chunks/standard/frag/normalMap.js';
 import opacityPS from '../chunks/standard/frag/opacity.js';
 import opacityDitherPS from '../chunks/standard/frag/opacity-dither.js';
+import outlineDeclarationPS from '../chunks/lit/frag/outline-declaration.js';
+import outlineOutputPS from '../chunks/lit/frag/outline-output.js';
 import outputPS from '../chunks/lit/frag/output.js';
 import outputAlphaPS from '../chunks/lit/frag/outputAlpha.js';
 import outputTex2DPS from '../chunks/common/frag/outputTex2D.js';
@@ -102,15 +110,19 @@ import reflectionCCPS from '../chunks/lit/frag/reflectionCC.js';
 import reflectionCubePS from '../chunks/lit/frag/reflectionCube.js';
 import reflectionEnvHQPS from '../chunks/lit/frag/reflectionEnvHQ.js';
 import reflectionEnvPS from '../chunks/lit/frag/reflectionEnv.js';
+import reflectionPlanarPS from '../chunks/lit/frag/reflectionPlanar.js';
 import reflectionSpherePS from '../chunks/lit/frag/reflectionSphere.js';
 import reflectionSheenPS from '../chunks/lit/frag/reflectionSheen.js';
 import refractionCubePS from '../chunks/lit/frag/refractionCube.js';
 import refractionDynamicPS from '../chunks/lit/frag/refractionDynamic.js';
 import reprojectPS from '../chunks/internal/frag/reproject.js';
 import reprojectVS from '../chunks/internal/vert/reproject.js';
+import reversibleTonemapPS from '../chunks/common/frag/reversibleTonemap.js';
 import screenDepthPS from '../chunks/common/frag/screenDepth.js';
 import shadowCascadesPS from '../chunks/lit/frag/lighting/shadowCascades.js';
+import shadowCasterPS from '../chunks/common/frag/shadow-caster.js';
 import shadowEVSMPS from '../chunks/lit/frag/lighting/shadowEVSM.js';
+import shadowEVSMExponentPS from '../chunks/common/frag/shadow-evsm-exponent.js';
 import shadowPCF1PS from '../chunks/lit/frag/lighting/shadowPCF1.js';
 import shadowPCF3PS from '../chunks/lit/frag/lighting/shadowPCF3.js';
 import shadowPCF5PS from '../chunks/lit/frag/lighting/shadowPCF5.js';
@@ -134,6 +146,7 @@ import thicknessPS from '../chunks/standard/frag/thickness.js';
 import tonemappingPS from '../chunks/common/frag/tonemapping/tonemapping.js';
 import tonemappingAcesPS from '../chunks/common/frag/tonemapping/tonemappingAces.js';
 import tonemappingAces2PS from '../chunks/common/frag/tonemapping/tonemappingAces2.js';
+import tonemappingAgxPS from '../chunks/common/frag/tonemapping/tonemappingAgx.js';
 import tonemappingFilmicPS from '../chunks/common/frag/tonemapping/tonemappingFilmic.js';
 import tonemappingHejlPS from '../chunks/common/frag/tonemapping/tonemappingHejl.js';
 import tonemappingLinearPS from '../chunks/common/frag/tonemapping/tonemappingLinear.js';
@@ -146,6 +159,9 @@ import transmissionPS from '../chunks/standard/frag/transmission.js';
 import twoSidedLightingPS from '../chunks/lit/frag/twoSidedLighting.js';
 import uv0VS from '../chunks/lit/vert/uv0.js';
 import uv1VS from '../chunks/lit/vert/uv1.js';
+import uvSetAttributeVS from '../chunks/lit/vert/uvSetAttribute.js';
+import uvSetVS from '../chunks/lit/vert/uvSet.js';
+import uvSetVaryingVS from '../chunks/lit/vert/uvSetVarying.js';
 import uvTransformVS from '../chunks/lit/vert/uvTransform.js';
 import uvTransformUniformsPS from '../chunks/lit/vert/uvTransformUniforms.js';
 import viewDirPS from '../chunks/lit/frag/viewDir.js';
@@ -176,6 +192,7 @@ const shaderChunksWGSL = {
     clearCoatPS,
     clearCoatGlossPS,
     clearCoatNormalPS,
+    clipPlanesPS,
     clusteredLightCookiesPS,
     clusteredLightShadowsPS,
     clusteredLightUtilsPS,
@@ -191,6 +208,8 @@ const shaderChunksWGSL = {
     debugProcessFrontendPS,
     detailModesPS,
     diffusePS,
+    diffuseTransmissionPS,
+    diffuseTransmissionColorPS,
     decodePS,
     emissivePS,
     encodePS,
@@ -199,7 +218,9 @@ const shaderChunksWGSL = {
     envProcPS,
     falloffInvSquaredPS,
     falloffLinearPS,
+    flatNormalPS,
     floatAsUintPS,
+    sceneTexturesPS,
     fogPS,
     fogMathPS,
     fresnelSchlickPS,
@@ -250,6 +271,7 @@ const shaderChunksWGSL = {
     litUserMainEndPS: '',  // empty chunk allowing user to add custom code
     litUserMainEndVS: '',  // empty chunk allowing user to add custom code
     ltcPS,
+    meshInstanceStorageVS,
     metalnessPS,
     metalnessModulatePS,
     morphPS,
@@ -261,6 +283,8 @@ const shaderChunksWGSL = {
     normalMapPS,
     opacityPS,
     opacityDitherPS,
+    outlineDeclarationPS,
+    outlineOutputPS,
     outputPS,
     outputAlphaPS,
     outputTex2DPS,
@@ -274,15 +298,19 @@ const shaderChunksWGSL = {
     reflectionCubePS,
     reflectionEnvHQPS,
     reflectionEnvPS,
+    reflectionPlanarPS,
     reflectionSpherePS,
     reflectionSheenPS,
     refractionCubePS,
     refractionDynamicPS,
     reprojectPS,
     reprojectVS,
+    reversibleTonemapPS,
     screenDepthPS,
     shadowCascadesPS,
+    shadowCasterPS,
     shadowEVSMPS,
+    shadowEVSMExponentPS,
     shadowPCF1PS,
     shadowPCF3PS,
     shadowPCF5PS,
@@ -306,6 +334,7 @@ const shaderChunksWGSL = {
     tonemappingPS,
     tonemappingAcesPS,
     tonemappingAces2PS,
+    tonemappingAgxPS,
     tonemappingFilmicPS,
     tonemappingHejlPS,
     tonemappingLinearPS,
@@ -318,6 +347,9 @@ const shaderChunksWGSL = {
     twoSidedLightingPS,
     uv0VS,
     uv1VS,
+    uvSetAttributeVS,
+    uvSetVS,
+    uvSetVaryingVS,
     uvTransformVS,
     uvTransformUniformsPS,
     viewDirPS,

@@ -2,13 +2,19 @@ import { path } from '../../core/path.js';
 import { Asset } from '../../framework/asset/asset.js';
 import { GlbParser } from './glb-parser.js';
 import { GlbContainerResource } from './glb-container-resource.js';
+import { getGlbResourceExtensions } from './glb-resource-extension.js';
 
 class GlbContainerParser {
-    constructor(device, assets, maxRetries) {
+    constructor(device, assets) {
         this._device = device;
         this._assets = assets;
         this._defaultMaterial = GlbParser.createDefaultMaterial();
-        this.maxRetries = maxRetries;
+    }
+
+    canParse() {
+        // GLB is the only built-in container format (it handles both .glb and .gltf); it acts as the
+        // catch-all, so any container asset resolves to it unless a more specific parser is registered
+        return true;
     }
 
     _getUrlWithoutParams(url) {
@@ -19,6 +25,11 @@ class GlbContainerParser {
         Asset.fetchArrayBuffer(url.load, (err, result) => {
             if (err) {
                 callback(err);
+            } else if (this._device._destroyed) {
+                // nothing cancels the download, so it can complete after the application was
+                // destroyed. Skip the parse, which needs the destroyed asset registry and device -
+                // the loader drops the result anyway.
+                callback(null, null);
             } else {
                 GlbParser.parse(
                     this._getUrlWithoutParams(url.original),
@@ -27,6 +38,7 @@ class GlbContainerParser {
                     this._device,
                     asset.registry,
                     asset.options,
+                    getGlbResourceExtensions(this.handler),
                     (err, result) => {
                         if (err) {
                             callback(err);
@@ -36,7 +48,7 @@ class GlbContainerParser {
                         }
                     });
             }
-        }, asset, this.maxRetries);
+        }, asset, this.handler.maxRetries);
     }
 
     open(url, data, asset) {

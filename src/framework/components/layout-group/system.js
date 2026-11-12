@@ -1,20 +1,35 @@
 import { Vec2 } from '../../../core/math/vec2.js';
 import { Vec4 } from '../../../core/math/vec4.js';
-import { Component } from '../component.js';
 import { ComponentSystem } from '../system.js';
 import { LayoutGroupComponent } from './component.js';
-import { LayoutGroupComponentData } from './data.js';
 
 /**
  * @import { AppBase } from '../../app-base.js'
+ * @import { Entity } from '../../entity.js'
  */
 
-const _schema = ['enabled'];
+/**
+ * Options of the `layoutgroup` component accepted by {@link LayoutGroupComponentSystem} that differ
+ * from the properties of {@link LayoutGroupComponent}. Each replaces the same-named property of the
+ * options that {@link Entity#addComponent} derives from the component class; see
+ * {@link ComponentOptionsOverrides}.
+ *
+ * @typedef {object} LayoutGroupComponentOptionsOverrides
+ * @property {Vec2 | number[]} [alignment] - Same as {@link LayoutGroupComponent#alignment}, also
+ * accepting an `[x, y]` array.
+ * @property {Vec4 | number[]} [padding] - Same as {@link LayoutGroupComponent#padding}, also
+ * accepting an `[x, y, z, w]` array.
+ * @property {Vec2 | number[]} [spacing] - Same as {@link LayoutGroupComponent#spacing}, also
+ * accepting an `[x, y]` array.
+ * @ignore
+ */
 
 const MAX_ITERATIONS = 100;
 
 /**
- * Manages creation of {@link LayoutGroupComponent}s.
+ * Manages the {@link LayoutGroupComponent}s of an application. Reach it through
+ * `app.systems.layoutgroup`; components are created with {@link Entity#addComponent}, never by
+ * calling the system directly.
  *
  * @category User Interface
  */
@@ -31,13 +46,10 @@ class LayoutGroupComponentSystem extends ComponentSystem {
         this.id = 'layoutgroup';
 
         this.ComponentType = LayoutGroupComponent;
-        this.DataType = LayoutGroupComponentData;
-
-        this.schema = _schema;
 
         this._reflowQueue = [];
 
-        this.on('beforeremove', this._onRemoveComponent, this);
+        this.on('beforeremove', this.onBeforeRemove, this);
 
         // Perform reflow when running in the engine
         this.app.systems.on('postUpdate', this._onPostUpdate, this);
@@ -61,7 +73,8 @@ class LayoutGroupComponentSystem extends ComponentSystem {
         if (data.heightFitting !== undefined) component.heightFitting = data.heightFitting;
         if (data.wrap !== undefined) component.wrap = data.wrap;
 
-        super.initializeComponentData(component, data, properties);
+        // pass an empty properties list as the enabled state is initialized above
+        super.initializeComponentData(component, data, []);
     }
 
     cloneComponent(entity, clone) {
@@ -123,8 +136,8 @@ class LayoutGroupComponentSystem extends ComponentSystem {
         }
     }
 
-    _onRemoveComponent(entity, component) {
-        component.onRemove();
+    onBeforeRemove(entity, component) {
+        component.onBeforeRemove();
     }
 
     destroy() {
@@ -133,7 +146,5 @@ class LayoutGroupComponentSystem extends ComponentSystem {
         this.app.systems.off('postUpdate', this._onPostUpdate, this);
     }
 }
-
-Component._buildAccessors(LayoutGroupComponent.prototype, _schema);
 
 export { LayoutGroupComponentSystem };

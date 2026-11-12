@@ -1,6 +1,16 @@
-import { http, Http } from '../../platform/net/http.js';
+import { JsonParser } from '../parsers/json.js';
 import { ResourceHandler } from './handler.js';
 
+/**
+ * @import { AppBase } from '../app-base.js'
+ */
+
+/**
+ * Resource handler for the `json` asset type. Loads a JSON file and parses it into the JavaScript
+ * value it encodes: an object, array, string, number, boolean or null.
+ *
+ * @category Asset
+ */
 class JsonHandler extends ResourceHandler {
     /**
      * TextDecoder for decoding binary data.
@@ -10,35 +20,15 @@ class JsonHandler extends ResourceHandler {
      */
     decoder = null;
 
+    /**
+     * Create a new JsonHandler instance.
+     *
+     * @param {AppBase} app - The running {@link AppBase}.
+     * @ignore
+     */
     constructor(app) {
         super(app, 'json');
-    }
-
-    load(url, callback) {
-        if (typeof url === 'string') {
-            url = {
-                load: url,
-                original: url
-            };
-        }
-
-        // if this a blob URL we need to set the response type as json
-        const options = {
-            retry: this.maxRetries > 0,
-            maxRetries: this.maxRetries
-        };
-
-        if (url.load.startsWith('blob:')) {
-            options.responseType = Http.ResponseType.JSON;
-        }
-
-        http.get(url.load, options, (err, response) => {
-            if (!err) {
-                callback(null, response);
-            } else {
-                callback(`Error loading JSON resource: ${url.original} [${err}]`);
-            }
-        });
+        this.addParser(new JsonParser());
     }
 
     /**
@@ -46,6 +36,7 @@ class JsonHandler extends ResourceHandler {
      *
      * @param {DataView} data - The raw data as a DataView
      * @returns {object} The parsed resource data.
+     * @ignore
      */
     openBinary(data) {
         this.decoder ??= new TextDecoder('utf-8');

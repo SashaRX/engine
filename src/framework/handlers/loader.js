@@ -1,9 +1,11 @@
 import { Debug } from '../../core/debug.js';
+import { http } from '../../platform/net/http.js';
 
 /**
  * @import { AppBase } from '../app-base.js'
  * @import { AssetRegistry } from '../asset/asset-registry.js'
  * @import { Asset } from '../asset/asset.js'
+ * @import { AssetType } from '../asset/asset.js'
  * @import { BundlesFilterCallback } from '../asset/asset-registry.js'
  * @import { ResourceHandler } from './handler.js'
  */
@@ -17,8 +19,26 @@ import { Debug } from '../../core/debug.js';
  */
 
 /**
- * Load resource data, potentially from remote sources. Caches resource on load to prevent multiple
- * requests. Add ResourceHandlers to handle different types of resources.
+ * The ResourceLoader turns a URL and an asset type into a loaded resource. It owns one
+ * {@link ResourceHandler} per type, dispatches each request to the matching handler, and caches the
+ * result by URL and type so the same request is fetched once. Each application has one at
+ * {@link AppBase#loader}.
+ *
+ * Most code never calls the loader directly: the {@link AssetRegistry} does so on its behalf when
+ * an {@link Asset} loads. Use the loader to add support for a new asset type with
+ * {@link addHandler}, to reach an existing handler with {@link getHandler}, or to tune requests
+ * with {@link maxConcurrentRequests}, {@link withCredentials} and {@link enableRetry}.
+ *
+ * Parsers for formats the engine does not load by default ship in the package and are registered on
+ * an existing handler rather than added as one: `playcanvas/scripts/esm/parsers/obj-model.mjs` adds
+ * `.obj` model loading and `playcanvas/scripts/esm/parsers/spz-parser.mjs` adds `.spz`
+ * Gaussian-splat loading.
+ *
+ * @example
+ * app.loader.getHandler('model').addParser(new ObjModelParser(app.graphicsDevice));
+ * @example
+ * app.loader.getHandler('gsplat').addParser(new SpzParser(app));
+ * @category Asset
  */
 class ResourceLoader {
     /**
@@ -38,29 +58,15 @@ class ResourceLoader {
      * and `open()`. Handlers can optionally support patch(asset, assets) to handle dependencies on
      * other assets.
      *
-     * @param {string} type - The name of the resource type that the handler will be registered
-     * with. Can be:
-     *
-     * - {@link ASSET_ANIMATION}
-     * - {@link ASSET_AUDIO}
-     * - {@link ASSET_IMAGE}
-     * - {@link ASSET_JSON}
-     * - {@link ASSET_MODEL}
-     * - {@link ASSET_MATERIAL}
-     * - {@link ASSET_TEXT}
-     * - {@link ASSET_TEXTURE}
-     * - {@link ASSET_CUBEMAP}
-     * - {@link ASSET_SHADER}
-     * - {@link ASSET_CSS}
-     * - {@link ASSET_HTML}
-     * - {@link ASSET_SCRIPT}
-     * - {@link ASSET_CONTAINER}
-     *
+     * @param {AssetType | (string & {})} type - The name of the resource type that the handler will
+     * be registered with: one of the built-in {@link AssetType} names, such as `'texture'`, `'model'`
+     * or `'container'`, or a new name for an application-defined handler. See {@link AssetMap} for
+     * typing the resource of a new name.
      * @param {ResourceHandler} handler - An instance of a resource handler
      * supporting at least `load()` and `open()`.
      * @example
-     * const loader = new ResourceLoader();
-     * loader.addHandler("json", new pc.JsonHandler());
+     * // register a handler for a new 'csv' asset type (see ResourceHandler for the class)
+     * app.loader.addHandler('csv', new CsvHandler(app));
      */
     addHandler(type, handler) {
         this._handlers[type] = handler;
@@ -70,7 +76,7 @@ class ResourceLoader {
     /**
      * Remove a {@link ResourceHandler} for a resource type.
      *
-     * @param {string} type - The name of the type that the handler will be removed.
+     * @param {AssetType | (string & {})} type - The name of the type that the handler will be removed.
      */
     removeHandler(type) {
         delete this._handlers[type];
@@ -79,7 +85,8 @@ class ResourceLoader {
     /**
      * Get a {@link ResourceHandler} for a resource type.
      *
-     * @param {string} type - The name of the resource type that the handler is registered with.
+     * @param {AssetType | (string & {})} type - The name of the resource type that the handler is
+     * registered with.
      * @returns {ResourceHandler|undefined} The registered handler, or
      * undefined if the requested handler is not registered.
      */
@@ -96,7 +103,8 @@ class ResourceLoader {
      * for the specified type. When loaded and parsed, use the callback to return an instance of
      * the resource.
      *
-     * @param {string} url - The URL of the resource to load.
+     * @param {string|null} url - The URL of the resource to load. Can be null for an asset that is
+     * not loaded from a file of its own, such as a cubemap loaded from its face assets.
      * @param {string} type - The type of resource expected.
      * @param {ResourceLoaderCallback} callback - The callback used when the resource is loaded or
      * an error occurs. Passed (err, resource) where err is null if there are no errors.
@@ -259,7 +267,9 @@ class ResourceLoader {
     }
 
     _onFailure(key, err) {
-        console.error(err);
+        // include a string-form message so external error reporters (which often JSON.stringify the
+        // arguments) get useful context, while keeping the original Error available for dev tools
+        console.error(`Failed to load resource [${key}]: ${err?.message ?? err}`, err);
         if (this._requests[key]) {
             for (let i = 0; i < this._requests[key].length; i++) {
                 this._requests[key][i](err);
@@ -333,14 +343,14 @@ class ResourceLoader {
     }
 
     /**
-     * Enables retrying of failed requests when loading assets.
+     * Enables retrying of failed requests when loading assets. Retries use exponential backoff and
+     * are also enabled by default for new applications.
      *
-     * @param {number} maxRetries - The maximum number of times to retry loading an asset. Defaults
-     * to 5.
-     * @ignore
+     * @param {number} [maxRetries] - The maximum number of times to retry loading an asset.
+     * Defaults to 5.
      */
     enableRetry(maxRetries = 5) {
-        maxRetries = Math.max(0, maxRetries) || 0;
+        maxRetries = Math.max(0, Math.floor(maxRetries)) || 0;
 
         for (const key in this._handlers) {
             this._handlers[key].maxRetries = maxRetries;
@@ -349,13 +359,71 @@ class ResourceLoader {
 
     /**
      * Disables retrying of failed requests when loading assets.
-     *
-     * @ignore
      */
     disableRetry() {
         for (const key in this._handlers) {
             this._handlers[key].maxRetries = 0;
         }
+    }
+
+    /**
+     * Sets the maximum number of asset requests that can be in flight at the same time. Additional
+     * requests are queued and dispatched as earlier ones complete. This prevents browsers from
+     * rejecting requests with `net::ERR_INSUFFICIENT_RESOURCES` when an app loads a very large
+     * number of assets at once. Set to `0` to disable throttling. Defaults to 128.
+     *
+     * Note: this is a process-global limit (it applies to the shared HTTP layer, matching the
+     * browser's per-process resource limit), so with multiple applications the last value set wins.
+     * It applies to all XHR-based requests, which covers the large majority of asset loads.
+     *
+     * @type {number}
+     * @example
+     * // never have more than 50 asset requests in flight at once
+     * app.loader.maxConcurrentRequests = 50;
+     */
+    set maxConcurrentRequests(value) {
+        // clamp to a non-negative integer (Infinity is preserved and also means "unlimited")
+        http.maxConcurrentRequests = Math.max(0, Math.floor(value)) || 0;
+    }
+
+    /**
+     * Gets the maximum number of asset requests that can be in flight at the same time.
+     *
+     * @type {number}
+     */
+    get maxConcurrentRequests() {
+        return http.maxConcurrentRequests;
+    }
+
+    /**
+     * Sets whether asset requests are sent with credentials. When true, cross-origin requests
+     * include credentials (cookies, client TLS certificates and HTTP authentication), allowing
+     * assets to be loaded from an authenticated cross-origin host. The server must respond with a
+     * non-wildcard `Access-Control-Allow-Origin` and `Access-Control-Allow-Credentials: true`.
+     * Defaults to false.
+     *
+     * Set this before assets start loading (i.e. before {@link AppBase#preload} or
+     * {@link AssetRegistry#load}). Note this is a process-global setting (it applies to the shared
+     * HTTP layer), so with multiple applications the last value set wins. It covers every asset
+     * load, including the asset bundle and gaussian splat loaders that fetch their data directly
+     * rather than through the HTTP layer.
+     *
+     * @type {boolean}
+     * @example
+     * // load all assets from an authenticated cross-origin host
+     * app.loader.withCredentials = true;
+     */
+    set withCredentials(value) {
+        http.withCredentials = !!value;
+    }
+
+    /**
+     * Gets whether asset requests are sent with credentials.
+     *
+     * @type {boolean}
+     */
+    get withCredentials() {
+        return http.withCredentials;
     }
 
     /**
@@ -365,6 +433,7 @@ class ResourceLoader {
         this._handlers = {};
         this._requests = {};
         this._cache = {};
+        this._app = null;
     }
 }
 

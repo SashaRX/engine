@@ -28,6 +28,8 @@ import { EventHandle } from './event-handle.js';
  * // fire event
  * obj.fire('hello', 'world');
  * ```
+ *
+ * @category Framework
  */
 class EventHandler {
     /**
@@ -96,13 +98,16 @@ class EventHandler {
      * the callback is limited to 8 arguments.
      * @param {object} [scope] - Object to use as 'this' when the event is fired, defaults to
      * current this.
-     * @returns {EventHandle} Can be used for removing event in the future.
+     * @returns {EventHandle} An event handle. For later removal, prefer retaining this handle and
+     * calling its {@link EventHandle#off} over {@link EventHandler#off} with a name/callback: it
+     * removes exactly this subscription and is faster (no scan of the callback list).
      * @example
      * obj.on('test', (a, b) => {
      *     console.log(a + b);
      * });
      * obj.fire('test', 1, 2); // prints 3 to the console
      * @example
+     * // preferred removal: retain the handle and call off() on it
      * const evt = obj.on('test', (a, b) => {
      *     console.log(a + b);
      * });
@@ -114,14 +119,18 @@ class EventHandler {
     }
 
     /**
-     * Attach an event handler to an event. This handler will be removed after being fired once.
+     * Attach an event handler to an event. The handler is removed before it is called, so it runs
+     * at most once, even if it fires the same event again or throws.
      *
      * @param {string} name - Name of the event to bind the callback to.
      * @param {HandleEventCallback} callback - Function that is called when event is fired. Note
      * the callback is limited to 8 arguments.
      * @param {object} [scope] - Object to use as 'this' when the event is fired, defaults to
      * current this.
-     * @returns {EventHandle} Can be used for removing event in the future.
+     * @returns {EventHandle} An event handle. For removal before it fires, prefer retaining this
+     * handle and calling its {@link EventHandle#off} over {@link EventHandler#off} with a
+     * name/callback: it removes exactly this subscription and is faster (no scan of the callback
+     * list).
      * @example
      * obj.once('test', (a, b) => {
      *     console.log(a + b);
@@ -137,6 +146,11 @@ class EventHandler {
      * Detach an event handler from an event. If callback is not provided then all callbacks are
      * unbound from the event, if scope is not provided then all events with the callback will be
      * unbound.
+     *
+     * Use this form to remove all listeners matching a name (and optionally callback/scope). To
+     * remove a single known subscription, prefer retaining the {@link EventHandle} returned by
+     * {@link EventHandler#on} / {@link EventHandler#once} and calling its {@link EventHandle#off}:
+     * it removes exactly that subscription and is faster (no scan of the callback list).
      *
      * @param {string} [name] - Name of the event to unbind.
      * @param {HandleEventCallback} [callback] - Function to be unbound.
@@ -286,44 +300,30 @@ class EventHandler {
         if (!this._callbackActive.has(name)) {
             // when starting callbacks execution ensure we store a list of initial callbacks
             this._callbackActive.set(name, callbacksInitial);
-        } else if (this._callbackActive.get(name) !== callbacksInitial) {
-            // if we are trying to execute a callback while there is an active execution right now
-            // and the active list has been already modified,
-            // then we go to an unoptimized path and clone callbacks list to ensure execution consistency
+        } else {
+            // A nested fire needs its own list so it cannot clear the outer execution's active list.
             callbacks = callbacksInitial.slice();
         }
 
-        // eslint-disable-next-line no-unmodified-loop-condition
-        for (let i = 0; (callbacks || this._callbackActive.get(name)) && (i < (callbacks || this._callbackActive.get(name)).length); i++) {
-            const evt = (callbacks || this._callbackActive.get(name))[i];
-            if (!evt.callback) continue;
+        try {
+            // eslint-disable-next-line no-unmodified-loop-condition
+            for (let i = 0; (callbacks || this._callbackActive.get(name)) && (i < (callbacks || this._callbackActive.get(name)).length); i++) {
+                const evt = (callbacks || this._callbackActive.get(name))[i];
+                if (!evt.callback || evt._onceFired) continue;
 
-            evt.callback.call(evt.scope, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
-
-            if (evt._once) {
-                // check that callback still exists because user may have unsubscribed in the event handler
-                const existingCallback = this._callbacks.get(name);
-                const ind = existingCallback ? existingCallback.indexOf(evt) : -1;
-
-                if (ind !== -1) {
-                    if (this._callbackActive.get(name) === existingCallback) {
-                        this._callbackActive.set(name, this._callbackActive.get(name).slice());
-                    }
-
-                    const callbacks = this._callbacks.get(name);
-                    if (!callbacks) continue;
-                    callbacks[ind].removed = true;
-                    callbacks.splice(ind, 1);
-
-                    if (callbacks.length === 0) {
-                        this._callbacks.delete(name);
-                    }
+                if (evt._once) {
+                    // Consume before calling: the callback can fire this event again or throw.
+                    // Keep this separate from removed, since active lists retain unsubscribed listeners.
+                    evt._onceFired = true;
+                    this.offByHandle(evt);
                 }
-            }
-        }
 
-        if (!callbacks) {
-            this._callbackActive.delete(name);
+                evt.callback.call(evt.scope, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
+            }
+        } finally {
+            if (!callbacks) {
+                this._callbackActive.delete(name);
+            }
         }
 
         return this;

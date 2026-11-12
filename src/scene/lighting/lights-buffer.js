@@ -55,7 +55,23 @@ const lightBufferDefines = `\n
 
 // A class used by clustered lighting, responsible for encoding light properties into textures for the use on the GPU
 class LightsBuffer {
-    areaLightsEnabled = false;
+    /**
+     * Bit mask (1 << shape) of the area light shapes the lit shaders support, 0 when area lights
+     * are disabled.
+     *
+     * @type {number}
+     */
+    areaLightShapes = 0;
+
+    /**
+     * Texture storing properties of all lights, one row of pixels per light.
+     *
+     * @type {Texture|null}
+     */
+    lightsTexture = null;
+
+    /** @type {number} */
+    _maxLights = 0;
 
     constructor(device) {
 
@@ -68,23 +84,48 @@ class LightsBuffer {
         // features
         this.cookiesEnabled = false;
         this.shadowsEnabled = false;
-        this.areaLightsEnabled = false;
+        this.areaLightShapes = 0;
 
-        // using 8 bit index so this is maximum supported number of lights
-        this.maxLights = 255;
-
-        // float texture
-        const pixelsPerLightFloat = TextureIndexFloat.COUNT;
-        this.lightsFloat = new Float32Array(4 * pixelsPerLightFloat * this.maxLights);
-        this.lightsUint = new Uint32Array(this.lightsFloat.buffer);
-        this.lightsTexture = this.createTexture(this.device, pixelsPerLightFloat, this.maxLights, PIXELFORMAT_RGBA32F, 'LightsTexture');
         this._lightsTextureId = this.device.scope.resolve('lightsTexture');
+
+        // allocates the storage for the lights - 255 lights and the reserved 'no light' slot
+        this.maxLights = 256;
 
         // compression ranges
         this.invMaxColorValue = 0;
         this.invMaxAttenuation = 0;
         this.boundsMin = new Vec3();
         this.boundsDelta = new Vec3();
+    }
+
+    /**
+     * Sets the number of light slots the buffer can store, and allocates the storage for them. This
+     * includes slot 0, which is reserved for the 'no light' index, and so the number of usable
+     * lights is one less than this.
+     *
+     * @type {number}
+     */
+    set maxLights(value) {
+        if (this._maxLights !== value) {
+            this._maxLights = value;
+
+            // float texture, one row of pixels per light
+            const pixelsPerLightFloat = TextureIndexFloat.COUNT;
+            this.lightsFloat = new Float32Array(4 * pixelsPerLightFloat * value);
+            this.lightsUint = new Uint32Array(this.lightsFloat.buffer);
+
+            this.lightsTexture?.destroy();
+            this.lightsTexture = this.createTexture(this.device, pixelsPerLightFloat, value, PIXELFORMAT_RGBA32F, 'LightsTexture');
+        }
+    }
+
+    /**
+     * Gets the number of light slots the buffer can store.
+     *
+     * @type {number}
+     */
+    get maxLights() {
+        return this._maxLights;
     }
 
     destroy() {
@@ -155,13 +196,14 @@ class LightsBuffer {
         return tempAreaLightSizes;
     }
 
-    // fill up both float and 8bit texture data with light properties
+    // fill up the float texture data with light properties
     addLightData(light, lightIndex) {
 
         const isSpot = light._type === LIGHTTYPE_SPOT;
         const hasAtlasViewport = light.atlasViewportAllocated; // if the light does not have viewport, it does not fit to the atlas
         const isCookie = this.cookiesEnabled && !!light._cookie && hasAtlasViewport;
-        const isArea = this.areaLightsEnabled && light.shape !== LIGHTSHAPE_PUNCTUAL;
+        // the mask never contains the punctual shape
+        const isArea = (this.areaLightShapes & (1 << light.shape)) !== 0;
         const castShadows = this.shadowsEnabled && light.castShadows && hasAtlasViewport;
         const pos = light._node.getPosition();
 
@@ -216,8 +258,11 @@ class LightsBuffer {
             // here we have unused float
         }
 
-        // flags
-        dataUint[dataFloatStart + 4 * TextureIndexFloat.DIRECTION_FLAGS + 3] = light.getClusteredFlags(castShadows, isCookie);
+        // flags - a light of an area light shape the shaders do not support has its shape (bits
+        // 29 - 28) cleared, so it renders as a punctual light
+        let flags = light.getClusteredFlags(castShadows, isCookie);
+        if (!isArea) flags &= ~(0x3 << 28);
+        dataUint[dataFloatStart + 4 * TextureIndexFloat.DIRECTION_FLAGS + 3] = flags;
 
         // light projection matrix
         if (lightProjectionMatrix) {

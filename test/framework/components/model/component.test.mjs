@@ -30,10 +30,10 @@ describe('ModelComponent', function () {
     const loadAssets = function (cb) {
         const assetlist = [
             new Asset('plane.json', 'model', {
-                url: 'http://localhost:3000/test/assets/plane/plane.json'
+                url: '/test/assets/plane/plane.json'
             }),
             new Asset('lambert1.json', 'material', {
-                url: 'http://localhost:3000/test/assets/plane/31208636/lambert1.json'
+                url: '/test/assets/plane/31208636/lambert1.json'
             })
         ];
 
@@ -135,8 +135,8 @@ describe('ModelComponent', function () {
         for (let i = 0; i < srcMi.length; i++) {
             expect(srcMi[i].mask).to.equal(dstMi[i].mask);
             expect(srcMi[i].layer).to.equal(dstMi[i].layer);
-            expect(srcMi[i].receiveShadow).to.equal(dstMi[i].receiveShadow);
-            expect(srcMi[i].castShadow).to.equal(dstMi[i].castShadow);
+            expect(srcMi[i].receiveShadows).to.equal(dstMi[i].receiveShadows);
+            expect(srcMi[i].castShadows).to.equal(dstMi[i].castShadows);
             expect(srcMi[i].material.id).to.exist;
             expect(srcMi[i].material.id).to.equal(dstMi[i].material.id);
         }
@@ -151,8 +151,8 @@ describe('ModelComponent', function () {
         });
         app.root.addChild(e);
 
-        e.model.model.meshInstances[0].receiveShadow = true;
-        e.model.model.meshInstances[0].castShadow = true;
+        e.model.model.meshInstances[0].receiveShadows = true;
+        e.model.model.meshInstances[0].castShadows = true;
         e.model.model.meshInstances[0].mask = 16;
         e.model.model.meshInstances[0].layer = 16;
 
@@ -166,8 +166,8 @@ describe('ModelComponent', function () {
         const dstMi = c.model.meshInstances;
 
         for (let i = 0; i < srcMi.length; i++) {
-            expect(srcMi[i].receiveShadow).to.equal(dstMi[i].receiveShadow);
-            expect(srcMi[i].castShadow).to.equal(dstMi[i].castShadow);
+            expect(srcMi[i].receiveShadows).to.equal(dstMi[i].receiveShadows);
+            expect(srcMi[i].castShadows).to.equal(dstMi[i].castShadows);
             expect(srcMi[i].mask).to.equal(dstMi[i].mask);
             expect(srcMi[i].layer).to.equal(dstMi[i].layer);
         }
@@ -257,7 +257,7 @@ describe('ModelComponent', function () {
 
     it('Materials applied when loading asynchronously', (done) => {
         const boxAsset = new Asset('Box', 'model', {
-            url: 'http://localhost:3000/test/assets/cube/cube.json'
+            url: '/test/assets/cube/cube.json'
         }, {
             'mapping': [
                 {
@@ -268,7 +268,7 @@ describe('ModelComponent', function () {
         });
 
         const materialAsset = new Asset('Material', 'material', {
-            url: 'http://localhost:3000/test/assets/cube/208808876/Material.json'
+            url: '/test/assets/cube/208808876/Material.json'
         });
 
         app.assets.add(boxAsset);
@@ -291,11 +291,11 @@ describe('ModelComponent', function () {
 
     it('Materials applied when added later', (done) => {
         const boxAsset = new Asset('Box', 'model', {
-            url: 'http://localhost:3000/test/assets/cube/cube.json'
+            url: '/test/assets/cube/cube.json'
         });
 
         const materialAsset = new Asset('Box Material', 'material', {
-            url: 'http://localhost:3000/test/assets/cube/208808876/Material.json'
+            url: '/test/assets/cube/208808876/Material.json'
         });
 
         app.assets.add(boxAsset);
@@ -328,11 +328,11 @@ describe('ModelComponent', function () {
 
     it('Material add events unbound on destroy', (done) => {
         const boxAsset = new Asset('Box', 'model', {
-            url: 'http://localhost:3000/test/assets/cube/cube.json'
+            url: '/test/assets/cube/cube.json'
         });
 
         const materialAsset = new Asset('Box Material', 'material', {
-            url: 'http://localhost:3000/test/assets/cube/208808876/Material.json'
+            url: '/test/assets/cube/208808876/Material.json'
         });
 
         app.assets.add(boxAsset);
@@ -376,7 +376,7 @@ describe('ModelComponent', function () {
 
     it('Asset materials unbound on destroy', (done) => {
         const modelAsset = new Asset('cube.json', 'model', {
-            url: 'http://localhost:3000/test/assets/cube/cube.json'
+            url: '/test/assets/cube/cube.json'
         }, {
             mapping: [{
                 material: assets.material.id
@@ -404,7 +404,7 @@ describe('ModelComponent', function () {
 
     it('Asset materials unbound on change model', (done) => {
         const modelAsset = new Asset('plane.json', 'model', {
-            url: 'http://localhost:3000/test/assets/plane/plane.json'
+            url: '/test/assets/plane/plane.json'
         }, {
             mapping: [{
                 material: assets.material.id
@@ -412,10 +412,10 @@ describe('ModelComponent', function () {
         });
 
         const materialAsset2 = new Asset('lambert2.json', 'material', {
-            url: 'http://localhost:3000/test/assets/plane/31208636/lambert1.json?t=1'
+            url: '/test/assets/plane/31208636/lambert1.json?t=1'
         });
         const modelAsset2 = new Asset('plane2.json', 'model', {
-            url: 'http://localhost:3000/test/assets/plane/plane.json?t=1'
+            url: '/test/assets/plane/plane.json?t=1'
         }, {
             mapping: [{
                 material: materialAsset2.id

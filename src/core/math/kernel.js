@@ -1,6 +1,14 @@
 /**
- * Sampling kernels.
+ * Sampling kernels: sets of 2D offsets, generated on demand, used to take several samples around a
+ * point, as blur, soft shadow and ambient occlusion effects do.
  *
+ * {@link concentric} produces a center point followed by points arranged in evenly spaced rings out
+ * to a radius of one, returned as a flat `[x, y, x, y, ...]` array ready to upload as a shader
+ * uniform.
+ *
+ * @example
+ * // A kernel with 3 rings and 8 points in the innermost ring
+ * const offsets = Kernel.concentric(3, 8);   // [0, 0, x1, y1, x2, y2, ...]
  * @category Math
  */
 class Kernel {
@@ -14,7 +22,7 @@ class Kernel {
      * @returns {number[]} An array where each point is represented by two consecutive numbers (x, y).
      * @example
      * // Generate a kernel with 3 rings and 8 points in the first ring
-     * const kernel = pc.Kernel.concentric(3, 8);
+     * const kernel = Kernel.concentric(3, 8);
      * // kernel is a flat array: [x0, y0, x1, y1, x2, y2, ...]
      */
     static concentric(numRings, numPoints) {

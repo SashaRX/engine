@@ -8,6 +8,7 @@ import { Vec4 } from '../../core/math/vec4.js';
  * @property {number} fileIndex - The file index in the octree files array
  * @property {number} offset - The offset in the file
  * @property {number} count - The count of items
+ * @ignore
  */
 
 const tmpMin = new Vec3();

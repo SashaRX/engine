@@ -1,21 +1,11 @@
+import { Debug } from '../../core/debug.js';
 import { EventHandler } from '../../core/event-handler.js';
 import { AppBase } from '../app-base.js';
 import { ScriptAttributes } from './script-attributes.js';
 import { ScriptType } from './script-type.js';
 import { ScriptTypes } from './script-types.js';
-import { Script } from './script.js';
-
-const reservedScriptNames = new Set([
-    'system', 'entity', 'create', 'destroy', 'swap', 'move', 'data',
-    'scripts', '_scripts', '_scriptsIndex', '_scriptsData',
-    'enabled', '_oldState', 'onEnable', 'onDisable', 'onPostStateChange',
-    '_onSetEnabled', '_checkState', '_onBeforeRemove',
-    '_onInitializeAttributes', '_onInitialize', '_onPostInitialize',
-    '_onUpdate', '_onPostUpdate',
-    '_callbacks', '_callbackActive', 'has', 'get', 'on', 'off', 'fire', 'once', 'hasEvent',
-    // 'worker' is reserved to prevent users from overwriting the native Worker constructor
-    'worker'
-]);
+import { reservedScriptNames } from './constants.js';
+import { Script, getScriptName } from './script.js';
 
 function getReservedScriptNames() {
     return reservedScriptNames;
@@ -40,7 +30,7 @@ function getReservedScriptNames() {
  * which the developer is meant to further extend by adding attributes and prototype methods.
  * Returns null if there was an error.
  * @example
- * var Turning = pc.createScript('turn');
+ * var Turning = createScript('turn');
  *
  * // define 'speed' attribute that is available in Editor UI
  * Turning.attributes.add('speed', {
@@ -68,8 +58,9 @@ function createScript(name, app) {
     scriptType.prototype = Object.create(ScriptType.prototype);
     scriptType.prototype.constructor = scriptType;
 
-    scriptType.extend = ScriptType.extend;
-    scriptType.attributes = new ScriptAttributes(scriptType);
+    // inherit the static members as well, as a class extending ScriptType does, which includes
+    // `extend` and the `attributes` getter that creates the attributes owned by this script type
+    Object.setPrototypeOf(scriptType, ScriptType);
 
     registerScript(scriptType, name, app);
     return scriptType;
@@ -102,7 +93,7 @@ createScript.reservedAttributes = reservedAttributes;
  * the current {@link AppBase}.
  * @example
  * // define an ES6 script class
- * class PlayerController extends pc.ScriptType {
+ * class PlayerController extends ScriptType {
  *
  *     initialize() {
  *         // called once on initialize
@@ -114,9 +105,9 @@ createScript.reservedAttributes = reservedAttributes;
  * }
  *
  * // register the class as a script
- * pc.registerScript(PlayerController);
+ * registerScript(PlayerController);
  *
- * // declare script attributes (Must be after pc.registerScript())
+ * // declare script attributes (Must be after registerScript())
  * PlayerController.attributes.add('attribute1', {type: 'number'});
  * @category Script
  */
@@ -126,10 +117,24 @@ function registerScript(script, name, app) {
     }
 
     if (!(script.prototype instanceof Script)) {
-        throw new Error(`script class: '${ScriptType.__getScriptName(script)}' does not extend pc.Script.`);
+        throw new Error(`script class: '${ScriptType.__getScriptName(script)}' does not extend Script.`);
     }
 
-    name = name || script.__name || ScriptType.__getScriptName(script);
+    // Resolve the name: an explicit `name` argument wins, otherwise the name is derived from the
+    // class itself - its own `__name`, its own `scriptName`, or, as a fallback, its verbatim class
+    // name. Only own properties are considered, so a subclass never inherits (and overwrites) its
+    // base's name. The verbatim class-name fallback (rather than the lowerCamelCase form used by
+    // `ScriptComponent.create` and the asset loader) preserves the pre-2.19.3 registration name, so
+    // projects that register ES6 classes via `registerScript(Class)` and reference them by their
+    // class name keep working.
+    name = name ||
+        (Object.prototype.hasOwnProperty.call(script, '__name') && script.__name) ||
+        getScriptName(script);
+
+    if (!name) {
+        Debug.error(`script class '${script.name || script}' has no name and cannot be registered. Add a static "scriptName" property or pass an explicit name.`);
+        return;
+    }
 
     if (reservedScriptNames.has(name)) {
         throw new Error(`script name: '${name}' is reserved, please change script name`);

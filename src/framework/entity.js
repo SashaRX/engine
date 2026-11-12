@@ -4,30 +4,77 @@ import { GraphNode } from '../scene/graph-node.js';
 import { getApplication } from './globals.js';
 
 /**
- * @import { AnimComponent } from './components/anim/component.js'
  * @import { AnimationComponent } from './components/animation/component.js'
+ * @import { AnimComponent } from './components/anim/component.js'
  * @import { AppBase } from './app-base.js'
  * @import { AudioListenerComponent } from './components/audio-listener/component.js'
  * @import { ButtonComponent } from './components/button/component.js'
  * @import { CameraComponent } from './components/camera/component.js'
  * @import { CollisionComponent } from './components/collision/component.js'
  * @import { Component } from './components/component.js'
+ * @import { ComponentSystem } from './components/system.js'
  * @import { ElementComponent } from './components/element/component.js'
  * @import { GSplatComponent } from './components/gsplat/component.js'
+ * @import { JointComponent } from './components/joint/component.js'
  * @import { LayoutChildComponent } from './components/layout-child/component.js'
  * @import { LayoutGroupComponent } from './components/layout-group/component.js'
  * @import { LightComponent } from './components/light/component.js'
+ * @import { MergedComponentOptions } from './components/component.js'
  * @import { ModelComponent } from './components/model/component.js'
  * @import { ParticleSystemComponent } from './components/particle-system/component.js'
  * @import { RenderComponent } from './components/render/component.js'
  * @import { RigidBodyComponent } from './components/rigid-body/component.js'
  * @import { ScreenComponent } from './components/screen/component.js'
+ * @import { Script } from './script/script.js'
  * @import { ScriptComponent } from './components/script/component.js'
- * @import { ScriptType } from './script/script-type.js'
- * @import { ScrollViewComponent } from './components/scroll-view/component.js'
  * @import { ScrollbarComponent } from './components/scrollbar/component.js'
+ * @import { ScrollViewComponent } from './components/scroll-view/component.js'
  * @import { SoundComponent } from './components/sound/component.js'
  * @import { SpriteComponent } from './components/sprite/component.js'
+ */
+
+/**
+ * The components an {@link Entity} can hold, keyed by the name passed to
+ * {@link Entity#addComponent}: `'camera'` maps to {@link CameraComponent}, `'light'` to
+ * {@link LightComponent} and so on. The map is derived from the component properties declared on
+ * `Entity`, so an application that registers its own {@link ComponentSystem} extends it - and
+ * with it the typing of {@link Entity#addComponent}, {@link Entity#findComponent} and
+ * {@link Entity#findComponents} - by declaring the matching property on `Entity`:
+ *
+ * ```ts
+ * declare module 'playcanvas' {
+ *     interface Entity {
+ *         readonly mything: MyComponent | undefined;
+ *     }
+ * }
+ * ```
+ *
+ * @typedef {{ [K in keyof Entity as NonNullable<Entity[K]> extends Component ? K : never]: NonNullable<Entity[K]> }} ComponentMap
+ */
+
+// Spelled `keyof ComponentMap & string` rather than `keyof ComponentMap` on purpose: the intersection
+// gives the resulting union its own identity, which carries this alias, so hovers and the API
+// reference show `ComponentName` instead of the expanded list of names. Every key is a string, so
+// the two spellings denote the same type.
+/**
+ * The name of a component an {@link Entity} can hold, such as `'camera'` or `'light'`: the keys of
+ * {@link ComponentMap}. This is what {@link Entity#addComponent}, {@link Entity#findComponent},
+ * {@link Entity#findComponents} and {@link Entity#removeComponent} take, and what
+ * {@link ComponentOptions} is indexed by.
+ *
+ * @typedef {keyof ComponentMap & string} ComponentName
+ */
+
+/**
+ * The options {@link Entity#addComponent} accepts for the component named `K`, for example
+ * `ComponentOptions<'camera'>`. These are the public, settable, non-function properties of the
+ * component class (see {@link ComponentMap}), all optional, plus the extras the component's system
+ * understands: option names that are not component properties, callbacks, and properties that
+ * also accept a plain array in place of a math object, such as `clearColor: [0, 0, 0, 1]`.
+ * Application-defined components get the same derivation from their component class.
+ *
+ * @template {ComponentName} K
+ * @typedef {{ [P in keyof MergedComponentOptions<K>]: MergedComponentOptions<K>[P] }} ComponentOptions
  */
 
 /**
@@ -67,16 +114,41 @@ const releaseTempArray = (a) => {
 };
 
 /**
- * The Entity is a core primitive of a PlayCanvas application. Generally speaking, any object in
- * your application will be represented by an Entity, along with a set of {@link Component}s. Each
- * component enables a particular capability. For example, the {@link RenderComponent} enables an
- * entity to render a 3D model, and the {@link ScriptComponent} enables an entity to run code that
- * implements custom behavior.
+ * An Entity is the core primitive of a PlayCanvas application. Every object in a scene (a camera, a
+ * light, a 3D model, a sound source, a piece of UI, or your own gameplay object) is represented by
+ * an Entity. On its own, an Entity is simply a named node in the scene graph; it gains behavior
+ * from the {@link Component}s attached to it.
  *
- * Entity is a subclass of {@link GraphNode} which allows entities to form a tree-like hierarchy
- * (based on parent/child relationships). The root of the entity hierarchy can be queried with
- * {@link AppBase#root}. Entities inherit a 3D transform from {@link GraphNode} which allows them
- * to be positioned, rotated and scaled.
+ * An Entity therefore brings together two things:
+ *
+ * - A transform: Entity extends {@link GraphNode}, so it has a position, rotation and scale, and
+ * can be parented to other entities to form a hierarchy. The root of that hierarchy is
+ * {@link AppBase#root}, and child entities inherit the transforms of their ancestors.
+ * - A set of components: each {@link Component} adds a single capability. For example, a
+ * {@link CameraComponent} renders the scene, a {@link LightComponent} lights it, a
+ * {@link RenderComponent} draws a 3D mesh, and a {@link ScriptComponent} runs your own code.
+ *
+ * Add a capability with {@link Entity#addComponent}, access it later through the matching property
+ * (such as {@link Entity#camera} or {@link Entity#render}), and remove it with
+ * {@link Entity#removeComponent}. An entity, together with all of its descendants and their
+ * components, can be enabled or disabled as a group via {@link GraphNode#enabled}, and removed from
+ * the scene with {@link Entity#destroy}.
+ *
+ * @example
+ * // Create an entity, give it a camera component, position it, and add it to the scene
+ * const camera = new Entity('camera');
+ * camera.addComponent('camera', {
+ *     clearColor: new Color(0.1, 0.1, 0.1)
+ * });
+ * camera.setPosition(0, 0, 10);
+ * app.root.addChild(camera);
+ * @example
+ * // Entities form a hierarchy: a child inherits its parent's transform
+ * const parent = new Entity('parent');
+ * const child = new Entity('child');
+ * parent.addChild(child);
+ * parent.setLocalPosition(5, 0, 0); // moves both parent and child
+ * @category Framework
  */
 class Entity extends GraphNode {
     /**
@@ -153,6 +225,15 @@ class Entity extends GraphNode {
      * @readonly
      */
     gsplat;
+
+    /**
+     * Gets the {@link JointComponent} attached to this entity.
+     *
+     * @type {JointComponent|undefined}
+     * @readonly
+     * @alpha
+     */
+    joint;
 
     /**
      * Gets the {@link LayoutChildComponent} attached to this entity.
@@ -300,7 +381,7 @@ class Entity extends GraphNode {
      * @param {AppBase} [app] - The application the entity belongs to, default is the current
      * application.
      * @example
-     * const entity = new pc.Entity();
+     * const entity = new Entity();
      *
      * // Add a Component to the Entity
      * entity.addComponent('camera', {
@@ -337,7 +418,13 @@ class Entity extends GraphNode {
      * Create a new component and add it to the entity. Use this to add functionality to the entity
      * like rendering a model, playing sounds and so on.
      *
-     * @param {string} type - The name of the component to add. Valid strings are:
+     * For the built-in components the `type` also types the options and the result:
+     * `entity.addComponent('camera', { fov: 45 })` accepts any settable property of
+     * {@link CameraComponent} and returns `CameraComponent | null`. See {@link ComponentOptions} for
+     * the rule and {@link ComponentMap} for extending this to application-defined components.
+     *
+     * @template {ComponentName | (string & {})} K
+     * @param {K} type - The name of the component to add (a {@link ComponentName}). Valid strings are:
      *
      * - "anim" - see {@link AnimComponent}
      * - "animation" - see {@link AnimationComponent}
@@ -361,12 +448,14 @@ class Entity extends GraphNode {
      * - "sound" - see {@link SoundComponent}
      * - "sprite" - see {@link SpriteComponent}
      *
-     * @param {object} [data] - The initialization data for the specific component type. Refer to
-     * each specific component's API reference page for details on valid values for this parameter.
-     * @returns {Component|null} The new Component that was attached to the entity or null if there
-     * was an error.
+     * @param {K extends ComponentName ? ComponentOptions<K> : object} [data] - The
+     * initialization data for the specific component type: the settable properties of the component
+     * class plus the extras its system understands (see {@link ComponentOptions}). Any object is
+     * accepted for a component name that is not in {@link ComponentMap}.
+     * @returns {(K extends ComponentName ? ComponentMap[K] : Component) | null} The new
+     * Component that was attached to the entity or null if there was an error.
      * @example
-     * const entity = new pc.Entity();
+     * const entity = new Entity();
      *
      * // Add a light component with default properties
      * entity.addComponent("light");
@@ -374,11 +463,11 @@ class Entity extends GraphNode {
      * // Add a camera component with some specified properties
      * entity.addComponent("camera", {
      *     fov: 45,
-     *     clearColor: new pc.Color(1, 0, 0)
+     *     clearColor: new Color(1, 0, 0)
      * });
      */
     addComponent(type, data) {
-        const system = this._app.systems[type];
+        const system = this._app.systems[/** @type {string} */ (type)];
         if (!system) {
             Debug.error(`addComponent: System '${type}' doesn't exist`);
             return null;
@@ -387,21 +476,21 @@ class Entity extends GraphNode {
             Debug.warn(`addComponent: Entity already has '${type}' component`);
             return null;
         }
-        return system.addComponent(this, data);
+        return /** @type {any} */ (system.addComponent(this, data));
     }
 
     /**
      * Remove a component from the Entity.
      *
-     * @param {string} type - The name of the Component type.
+     * @param {ComponentName | (string & {})} type - The name of the Component type.
      * @example
-     * const entity = new pc.Entity();
+     * const entity = new Entity();
      * entity.addComponent("light"); // add new light component
      *
      * entity.removeComponent("light"); // remove light component
      */
     removeComponent(type) {
-        const system = this._app.systems[type];
+        const system = this._app.systems[/** @type {string} */ (type)];
         if (!system) {
             Debug.error(`removeComponent: System '${type}' doesn't exist`);
             return;
@@ -416,60 +505,133 @@ class Entity extends GraphNode {
     /**
      * Search the entity and all of its descendants for the first component of specified type.
      *
-     * @param {string} type - The name of the component type to retrieve.
-     * @returns {Component} A component of specified type, if the entity or any of its descendants
-     * has one. Returns undefined otherwise.
+     * @template {ComponentName | (string & {})} K
+     * @param {K} type - The name of the component type to retrieve.
+     * @returns {(K extends ComponentName ? ComponentMap[K] : Component) | null} A component of
+     * specified type, if the entity or any of its descendants has one. Returns null otherwise.
      * @example
      * // Get the first found light component in the hierarchy tree that starts with this entity
      * const light = entity.findComponent("light");
      */
     findComponent(type) {
         const entity = this.findOne(entity => entity.c?.[type]);
-        return entity && entity.c[type];
+        return /** @type {any} */ (entity && entity.c[type]);
     }
 
     /**
      * Search the entity and all of its descendants for all components of specified type.
      *
-     * @param {string} type - The name of the component type to retrieve.
-     * @returns {Component[]} All components of specified type in the entity or any of its
-     * descendants. Returns empty array if none found.
+     * @template {ComponentName | (string & {})} K
+     * @param {K} type - The name of the component type to retrieve.
+     * @returns {(K extends ComponentName ? ComponentMap[K] : Component)[]} All components of
+     * specified type in the entity or any of its descendants. Returns empty array if none found.
      * @example
      * // Get all light components in the hierarchy tree that starts with this entity
      * const lights = entity.findComponents("light");
      */
     findComponents(type) {
-        return this.find(entity => entity.c?.[type]).map(entity => entity.c[type]);
+        return /** @type {any} */ (this.find(entity => entity.c?.[type]).map(entity => entity.c[type]));
     }
 
     /**
-     * Search the entity and all of its descendants for the first script instance of specified type.
+     * Search the entity and all of its descendants for the first script instance of the specified
+     * class. The result is typed as an instance of that class, so no cast is needed.
      *
-     * @param {string|typeof ScriptType} nameOrType - The name or type of {@link ScriptType}.
-     * @returns {ScriptType|undefined} A script instance of specified type, if the entity or any of
-     * its descendants has one. Returns undefined otherwise.
+     * @template {Script} T
+     * @overload
+     * @param {new (...args: any[]) => T} type - The script class to search for.
+     * @returns {T|undefined} A script instance of the specified class, if the entity or any of its
+     * descendants has one. Returns undefined otherwise.
+     * @example
+     * // Get the first PlayerController instance in the hierarchy tree that starts with this entity
+     * const controller = entity.findScript(PlayerController); // PlayerController | undefined
+     */
+    /**
+     * Search the entity and all of its descendants for the first script instance with the
+     * specified name.
+     *
+     * @overload
+     * @param {string} name - The name of the script to search for.
+     * @returns {Script|undefined} A script instance with the specified name, if the entity or any
+     * of its descendants has one. Returns undefined otherwise.
      * @example
      * // Get the first found "playerController" instance in the hierarchy tree that starts with this entity
      * const controller = entity.findScript("playerController");
      */
+    /**
+     * @param {string|typeof Script} nameOrType - The name or class of the script.
+     * @returns {Script|undefined} The first matching script instance, or undefined.
+     */
     findScript(nameOrType) {
-        const entity = this.findOne(node => node.c?.script?.has(nameOrType));
-        return entity?.c.script.get(nameOrType);
+        const entity = this.findOne(node => !!node.c?.script?.get(nameOrType));
+        return entity ? entity.c.script.get(nameOrType) : undefined;
     }
 
     /**
-     * Search the entity and all of its descendants for all script instances of specified type.
+     * Search the entity and all of its descendants for all script instances of the specified
+     * class. The result is typed as an array of that class, so no cast is needed.
      *
-     * @param {string|typeof ScriptType} nameOrType - The name or type of {@link ScriptType}.
-     * @returns {ScriptType[]} All script instances of specified type in the entity or any of its
-     * descendants. Returns empty array if none found.
+     * @template {Script} T
+     * @overload
+     * @param {new (...args: any[]) => T} type - The script class to search for.
+     * @returns {T[]} All script instances of the specified class in the entity or any of its
+     * descendants. Returns an empty array if none are found.
+     * @example
+     * // Get all PlayerController instances in the hierarchy tree that starts with this entity
+     * const controllers = entity.findScripts(PlayerController); // PlayerController[]
+     */
+    /**
+     * Search the entity and all of its descendants for all script instances with the specified
+     * name.
+     *
+     * @overload
+     * @param {string} name - The name of the script to search for.
+     * @returns {Script[]} All script instances with the specified name in the entity or any of its
+     * descendants. Returns an empty array if none are found.
      * @example
      * // Get all "playerController" instances in the hierarchy tree that starts with this entity
      * const controllers = entity.findScripts("playerController");
      */
+    /**
+     * @param {string|typeof Script} nameOrType - The name or class of the script.
+     * @returns {Script[]} All matching script instances.
+     */
     findScripts(nameOrType) {
-        const entities = this.find(node => node.c?.script?.has(nameOrType));
+        const entities = this.find(node => !!node.c?.script?.get(nameOrType));
         return entities.map(entity => entity.c.script.get(nameOrType));
+    }
+
+    /**
+     * Sets the GUID for this Entity. Note that it is unlikely that you should need to change the
+     * GUID value of an Entity at run-time. Doing so will corrupt the graph this Entity is in.
+     *
+     * @type {string}
+     * @ignore
+     */
+    set guid(value) {
+        // remove current guid from entityIndex
+        const index = this._app._entityIndex;
+        if (this._guid) {
+            delete index[this._guid];
+        }
+
+        // add new guid to entityIndex
+        this._guid = value;
+        index[this._guid] = this;
+    }
+
+    /**
+     * Gets the GUID for this Entity.
+     *
+     * @type {string}
+     */
+    get guid() {
+        // if the guid hasn't been set yet then set it now before returning it
+        if (!this._guid) {
+            this.guid = guid.create();
+        }
+
+        return this._guid;
     }
 
     /**
@@ -477,14 +639,11 @@ class Entity extends GraphNode {
      *
      * @returns {string} The GUID of the Entity.
      * @ignore
+     * @deprecated Use {@link Entity#guid} instead.
      */
     getGuid() {
-        // if the guid hasn't been set yet then set it now before returning it
-        if (!this._guid) {
-            this.setGuid(guid.create());
-        }
-
-        return this._guid;
+        Debug.deprecated('Entity#getGuid is deprecated. Use Entity#guid instead.');
+        return this.guid;
     }
 
     /**
@@ -493,17 +652,11 @@ class Entity extends GraphNode {
      *
      * @param {string} guid - The GUID to assign to the Entity.
      * @ignore
+     * @deprecated Use {@link Entity#guid} instead.
      */
     setGuid(guid) {
-        // remove current guid from entityIndex
-        const index = this._app._entityIndex;
-        if (this._guid) {
-            delete index[this._guid];
-        }
-
-        // add new guid to entityIndex
-        this._guid = guid;
-        index[this._guid] = this;
+        Debug.deprecated('Entity#setGuid is deprecated. Use Entity#guid instead.');
+        this.guid = guid;
     }
 
     /**
@@ -642,7 +795,7 @@ class Entity extends GraphNode {
     clone() {
         const duplicatedIdsMap = {};
         const clone = this._cloneRecursively(duplicatedIdsMap);
-        duplicatedIdsMap[this.getGuid()] = clone;
+        duplicatedIdsMap[this.guid] = clone;
 
         resolveDuplicatedEntityReferenceProperties(this, this, clone, duplicatedIdsMap);
 
@@ -689,7 +842,7 @@ class Entity extends GraphNode {
             if (oldChild instanceof Entity) {
                 const newChild = oldChild._cloneRecursively(duplicatedIdsMap);
                 clone.addChild(newChild);
-                duplicatedIdsMap[oldChild.getGuid()] = newChild;
+                duplicatedIdsMap[oldChild.guid] = newChild;
             }
         }
 
@@ -730,7 +883,7 @@ function resolveDuplicatedEntityReferenceProperties(oldSubtreeRoot, oldEntity, n
                 const entityIsWithinOldSubtree = !!oldSubtreeRoot.findByGuid(oldEntityReferenceId);
 
                 if (entityIsWithinOldSubtree) {
-                    const newEntityReferenceId = duplicatedIdsMap[oldEntityReferenceId].getGuid();
+                    const newEntityReferenceId = duplicatedIdsMap[oldEntityReferenceId].guid;
 
                     if (newEntityReferenceId) {
                         newEntity.c[componentName][propertyName] = newEntityReferenceId;
@@ -754,6 +907,11 @@ function resolveDuplicatedEntityReferenceProperties(oldSubtreeRoot, oldEntity, n
         // Handle entity button attributes
         if (components.button) {
             newEntity.button.resolveDuplicatedEntityReferenceProperties(components.button, duplicatedIdsMap);
+        }
+
+        // Handle entity joint attributes
+        if (components.joint) {
+            newEntity.joint.resolveDuplicatedEntityReferenceProperties(components.joint, duplicatedIdsMap);
         }
 
         // Handle entity scrollview attributes

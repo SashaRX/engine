@@ -59,9 +59,22 @@ const _keyCodeToKeyIdentifier = {
  * changes and window blur events by clearing key states. The Keyboard instance must be attached to
  * a DOM element before it can detect key events.
  *
+ * Key state is derived from the legacy `KeyboardEvent.keyCode` property. Browsers populate it for
+ * real input, but a hand-constructed `new KeyboardEvent(...)` leaves it at 0, so synthesized events
+ * must set `keyCode` explicitly in order to be observed.
+ *
+ * {@link Keyboard#wasPressed} and {@link Keyboard#wasReleased} compare against a snapshot taken
+ * once per frame, so a keydown and keyup delivered within the same task are seen by neither. Hold
+ * the key across at least one frame.
+ *
  * Your application's Keyboard instance is managed and accessible via {@link AppBase#keyboard}.
  *
- * @category Input
+ * For pointer-lock-aware, frame-accumulated input deltas rather than raw events, see
+ * {@link KeyboardMouseSource}, {@link GamepadSource} and {@link MultiTouchSource}, which feed
+ * {@link InputController}s such as {@link OrbitController}, {@link FlyController} and
+ * {@link FocusController}.
+ *
+ * @category Input Devices
  */
 class Keyboard extends EventHandler {
     /**
@@ -70,7 +83,7 @@ class Keyboard extends EventHandler {
      * @event
      * @example
      * const onKeyDown = (e) => {
-     *     if (e.key === pc.KEY_SPACE) {
+     *     if (e.key === KEY_SPACE) {
      *         // space key pressed
      *     }
      *     e.event.preventDefault(); // Use original browser event to prevent browser action.
@@ -86,7 +99,7 @@ class Keyboard extends EventHandler {
      * @event
      * @example
      * const onKeyUp = (e) => {
-     *     if (e.key === pc.KEY_SPACE) {
+     *     if (e.key === KEY_SPACE) {
      *         // space key released
      *     }
      *     e.event.preventDefault(); // Use original browser event to prevent browser action.
@@ -165,7 +178,7 @@ class Keyboard extends EventHandler {
      * event.
      * @example
      * // attach keyboard listeners to the window
-     * const keyboard = new pc.Keyboard(window);
+     * const keyboard = new Keyboard(window);
      */
     constructor(element, options = {}) {
         super();
@@ -185,7 +198,9 @@ class Keyboard extends EventHandler {
     }
 
     /**
-     * Attach the keyboard event handlers to an Element.
+     * Attach the keyboard event handlers to an Element. If already attached, this first detaches
+     * and clears current and previous key states, even when attaching to the same element. No
+     * `keyup` events are fired. Unlike {@link Mouse#attach}, held input states are not preserved.
      *
      * @param {Element|Window} element - The element to listen for keyboard events on.
      */
@@ -204,7 +219,8 @@ class Keyboard extends EventHandler {
     }
 
     /**
-     * Detach the keyboard event handlers from the element it is attached to.
+     * Detach the keyboard event handlers from the element it is attached to and clear current and
+     * previous key states. This does not fire `keyup` events.
      */
     detach() {
         if (!this._element) {
@@ -219,6 +235,8 @@ class Keyboard extends EventHandler {
 
         document.removeEventListener('visibilitychange', this._visibilityChangeHandler, false);
         window.removeEventListener('blur', this._windowBlurHandler, false);
+
+        this._handleWindowBlur();
     }
 
     /**

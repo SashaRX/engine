@@ -29,9 +29,9 @@ const _transform = new Mat4();
  * to an {@link Entity}, use {@link Entity#addComponent}:
  *
  * ```javascript
- * const entity = new pc.Entity();
+ * const entity = new Entity();
  * entity.addComponent('screen', {
- *     referenceResolution: new pc.Vec2(1280, 720),
+ *     referenceResolution: new Vec2(1280, 720),
  *     screenSpace: false
  * });
  * ```
@@ -47,7 +47,7 @@ const _transform = new Mat4();
  *
  * Relevant Engine API examples:
  *
- * - [Screen Space Screen](https://playcanvas.github.io/#/user-interface/text)
+ * - [Screen Space Screen](https://playcanvas.github.io/#/user-interface/screen-scaling)
  * - [World Space Screen](https://playcanvas.github.io/#/user-interface/world-ui)
  *
  * @hideconstructor
@@ -107,7 +107,7 @@ class ScreenComponent extends Component {
      * the next update loop.
      */
     syncDrawOrder() {
-        this.system.queueDrawOrderSync(this.entity.getGuid(), this._processDrawOrderSync, this);
+        this.system.queueDrawOrderSync(this.entity.guid, this._processDrawOrderSync, this);
     }
 
     _recurseDrawOrderSync(e, i) {
@@ -193,7 +193,7 @@ class ScreenComponent extends Component {
         this._elements.delete(element);
     }
 
-    onRemove() {
+    onBeforeRemove() {
         this.system.app.graphicsDevice.off('resizecanvas', this._onResize, this);
         this.fire('remove');
 
@@ -258,7 +258,7 @@ class ScreenComponent extends Component {
             this.entity._dirtifyLocal();
         }
 
-        this.fire('set:referenceresolution', this._resolution);
+        this.fire('set:referenceresolution', this._referenceResolution);
         this._elements.forEach(element => element._onScreenResize(this._resolution));
     }
 

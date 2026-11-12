@@ -2,9 +2,21 @@ import { CURVE_SMOOTHSTEP } from './constants.js';
 import { CurveEvaluator } from './curve-evaluator.js';
 
 /**
- * A curve is a collection of keys (time/value pairs). The shape of the curve is defined by its
- * type that specifies an interpolation scheme for the keys.
+ * A curve is a collection of keys (time/value pairs). The shape of the curve is defined by its type
+ * that specifies an interpolation scheme for the keys.
  *
+ * Keys are kept sorted by time. Supply them to the constructor as a flat `[time, value, ...]` array
+ * or insert them one at a time with {@link add}, then evaluate the curve at any time with
+ * {@link value}. The {@link type} selects how values between keys are computed:
+ * {@link CURVE_LINEAR}, {@link CURVE_SMOOTHSTEP}, {@link CURVE_SPLINE} or {@link CURVE_STEP}.
+ * Curves drive values that change over time or over a normalized range, such as particle size over
+ * a particle's lifetime.
+ *
+ * @example
+ * // Ease a value in over one second and read it back a quarter of the way through
+ * const curve = new Curve([0, 0, 1, 1]);
+ * curve.type = CURVE_SMOOTHSTEP;
+ * const v = curve.value(0.25);
  * @category Math
  */
 class Curve {
@@ -49,7 +61,7 @@ class Curve {
      * @param {number[]} [data] - An array of keys (pairs of numbers with the time first and value
      * second).
      * @example
-     * const curve = new pc.Curve([
+     * const curve = new Curve([
      *     0, 0,        // At 0 time, value of 0
      *     0.33, 2,     // At 0.33 time, value of 2
      *     0.66, 2.6,   // At 0.66 time, value of 2.6
@@ -82,7 +94,7 @@ class Curve {
      * @param {number} value - Value of new key.
      * @returns {number[]} The newly created `[time, value]` pair.
      * @example
-     * const curve = new pc.Curve();
+     * const curve = new Curve();
      * curve.add(0, 1);   // add key at time 0 with value 1
      * curve.add(1, 2);   // add key at time 1 with value 2
      */
@@ -103,12 +115,43 @@ class Curve {
     }
 
     /**
+     * Removes the key at the specified index.
+     *
+     * @param {number} index - The index of the key to remove.
+     * @returns {number[]|null} The removed `[time, value]` pair, or null if the index is out of
+     * range.
+     * @example
+     * const curve = new Curve([0, 1, 1, 2]);
+     * curve.remove(0); // removes the key at time 0
+     */
+    remove(index) {
+        if (index < 0 || index >= this.keys.length) {
+            return null;
+        }
+
+        return this.keys.splice(index, 1)[0];
+    }
+
+    /**
+     * Removes all keys from the curve.
+     *
+     * @returns {this} The curve instance.
+     * @example
+     * const curve = new Curve([0, 1, 1, 2]);
+     * curve.clear(); // curve now has no keys
+     */
+    clear() {
+        this.keys.length = 0;
+        return this;
+    }
+
+    /**
      * Gets the `[time, value]` pair at the specified index.
      *
      * @param {number} index - The index of key to return.
      * @returns {number[]} The `[time, value]` pair at the specified index.
      * @example
-     * const curve = new pc.Curve([0, 1, 1, 2]);
+     * const curve = new Curve([0, 1, 1, 2]);
      * const key = curve.get(0); // returns [0, 1]
      */
     get(index) {
@@ -128,7 +171,7 @@ class Curve {
      * @param {number} time - The time at which to calculate the value.
      * @returns {number} The interpolated value.
      * @example
-     * const curve = new pc.Curve([0, 0, 1, 10]);
+     * const curve = new Curve([0, 0, 1, 10]);
      * const value = curve.value(0.5); // returns interpolated value at time 0.5
      */
     value(time) {
@@ -138,23 +181,33 @@ class Curve {
     }
 
     /**
-     * Returns the key closest to the specified time.
+     * Returns the key closest to the specified time. When two keys are equally close, the later
+     * one is returned.
      *
      * @param {number} time - The time to find the closest key to.
      * @returns {number[]|null} The `[time, value]` pair closest to the specified time, or null if
      * no keys exist.
      * @example
-     * const curve = new pc.Curve([0, 1, 0.5, 2, 1, 3]);
+     * const curve = new Curve([0, 1, 0.5, 2, 1, 3]);
      * const key = curve.closest(0.6); // returns [0.5, 2]
      */
     closest(time) {
         const keys = this.keys;
         const length = keys.length;
-        let min = 2;
+        if (length === 0) {
+            return null;
+        }
+
+        // a time before or after the curve is closest to the key at that end. Clamp it first: far
+        // enough out, and always at -Infinity, every key is the same distance away and the
+        // tie-break would pick the last one
+        const t = Math.min(Math.max(time, keys[0][0]), keys[length - 1][0]);
+
+        let min = Infinity;
         let result = null;
 
         for (let i = 0; i < length; i++) {
-            const diff = Math.abs(time - keys[i][0]);
+            const diff = Math.abs(t - keys[i][0]);
             if (min >= diff) {
                 min = diff;
                 result = keys[i];
@@ -171,7 +224,7 @@ class Curve {
      *
      * @returns {this} A clone of the specified curve.
      * @example
-     * const curve = new pc.Curve([0, 0, 1, 10]);
+     * const curve = new Curve([0, 0, 1, 10]);
      * const clonedCurve = curve.clone();
      */
     clone() {

@@ -2,6 +2,11 @@
 // by the fragment shader of the standard shader.
 export default /* glsl */`
 
+    #ifdef MESH_COLOR
+        // Linear RGB replaces material emission; alpha replaces material opacity.
+        uniform vec4 mesh_color;
+    #endif
+
     // globals
     float dAlpha = 1.0;
 
@@ -20,27 +25,34 @@ export default /* glsl */`
         vec3 dSpecularity = vec3(0.0);
         float dGlossiness = 0.0;
 
+        // the ambient color of the material
+        uniform vec3 material_ambient;
+
+        #ifdef LIT_DISPERSION
+            uniform float material_dispersion;
+        #endif
+
         #ifdef LIT_REFRACTION
             float dTransmission;
             float dThickness;
-        #endif
 
-        #ifdef LIT_SCENE_COLOR
-            uniform sampler2D uSceneColorMap;
-        #endif
-
-        #ifdef LIT_SCREEN_SIZE
-            uniform vec4 uScreenSize;
-        #endif
-
-        #ifdef LIT_TRANSFORMS
-            uniform mat4 matrix_viewProjection;
-            uniform mat4 matrix_model;
+            // ior, unless it is declared by the metalness path below
+            #ifndef LIT_METALNESS
+                float dIor;
+            #endif
         #endif
 
         // parallax
         #ifdef STD_HEIGHT_MAP
             vec2 dUvOffset;
+            #ifdef STD_PARALLAX_SELF_SHADOW
+                // The depth the view ray hit the height field at, and the mip level the march read.
+                // Both are carried to the per light self shadow march, which starts where the
+                // shading does. The depth already has the distance fade applied, so it reaches zero
+                // with the fade and the shadow goes with it.
+                float dParallaxHitDepth;
+                float dParallaxLod;
+            #endif
             #ifdef STD_HEIGHT_TEXTURE_ALLOCATE
                 uniform sampler2D texture_heightMap;
             #endif
@@ -53,6 +65,19 @@ export default /* glsl */`
 
         #ifdef STD_DIFFUSEDETAIL_TEXTURE_ALLOCATE
             uniform sampler2D texture_diffuseDetailMap;
+        #endif
+
+        // diffuse transmission
+        #ifdef LIT_DIFFUSE_TRANSMISSION
+            float dDiffuseTransmission;
+            vec3 dDiffuseTransmissionColor;
+
+            #ifdef STD_DIFFUSETRANSMISSION_TEXTURE_ALLOCATE
+                uniform sampler2D texture_diffuseTransmissionMap;
+            #endif
+            #ifdef STD_DIFFUSETRANSMISSIONCOLOR_TEXTURE_ALLOCATE
+                uniform sampler2D texture_diffuseTransmissionColorMap;
+            #endif
         #endif
 
         // normal
@@ -77,7 +102,7 @@ export default /* glsl */`
             float dIridescence;
             float dIridescenceThickness;
 
-            #ifdef STD_IRIDESCENCE_THICKNESS_TEXTURE_ALLOCATE
+            #ifdef STD_IRIDESCENCETHICKNESS_TEXTURE_ALLOCATE
                 uniform sampler2D texture_iridescenceThicknessMap;
             #endif
             #ifdef STD_IRIDESCENCE_TEXTURE_ALLOCATE
@@ -96,8 +121,8 @@ export default /* glsl */`
             vec2 dAnisotropyRotation;
         #endif
 
-        // specularity & glossiness
-        #ifdef LIT_SPECULAR_OR_REFLECTION
+        // specularity & glossiness (also needed by refraction, which uses specularity and gloss)
+        #if defined(LIT_SPECULAR_OR_REFLECTION) || defined(LIT_REFRACTION)
 
             // sheen
             #ifdef LIT_SHEEN
@@ -185,7 +210,7 @@ export default /* glsl */`
         #if defined(STD_LIGHTMAP) || defined(STD_LIGHT_VERTEX_COLOR)
             vec3 dLightmap;
             #ifdef STD_LIGHT_TEXTURE_ALLOCATE
-                uniform sampler2D texture_lightMap;
+                uniform sampler2D {STD_LIGHT_TEXTURE_NAME};
             #endif
         #endif
     #endif

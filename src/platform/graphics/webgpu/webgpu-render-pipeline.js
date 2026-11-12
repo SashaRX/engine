@@ -1,16 +1,15 @@
 import { Debug, DebugHelper } from '../../../core/debug.js';
 import { hash32Fnv1a } from '../../../core/hash.js';
-import { array } from '../../../core/array-utils.js';
 import { TRACEID_RENDERPIPELINE_ALLOC } from '../../../core/constants.js';
 import { WebgpuVertexBufferLayout } from './webgpu-vertex-buffer-layout.js';
 import { WebgpuDebug } from './webgpu-debug.js';
 import { WebgpuPipeline } from './webgpu-pipeline.js';
 import { DebugGraphics } from '../debug-graphics.js';
+import { BlendState } from '../blend-state.js';
 import { bindGroupNames, PRIMITIVE_LINESTRIP, PRIMITIVE_TRISTRIP } from '../constants.js';
 
 /**
  * @import { BindGroupFormat } from '../bind-group-format.js'
- * @import { BlendState } from '../blend-state.js'
  * @import { DepthState } from '../depth-state.js'
  * @import { RenderTarget } from '../render-target.js'
  * @import { Shader } from '../shader.js'
@@ -21,6 +20,32 @@ import { bindGroupNames, PRIMITIVE_LINESTRIP, PRIMITIVE_TRISTRIP } from '../cons
 
 let _pipelineId = 0;
 
+// reused destination for BlendState#getAttachment, to avoid allocations
+const _attachmentBlendState = new BlendState();
+
+// GPUTextureFormats which are blendable and have an alpha channel, which the WebGPU spec requires
+// of the first color attachment when alpha-to-coverage is enabled. Note that 'rgba32float' also
+// qualifies, but only when the float32-blendable feature is available, and so it is handled
+// separately.
+const _alphaToCoverageFormats = new Set([
+    'rgba8unorm',
+    'rgba8unorm-srgb',
+    'bgra8unorm',
+    'bgra8unorm-srgb',
+    'rgb10a2unorm',
+    'rgba16float'
+]);
+
+// Assembles the WebGPU color write mask of the supplied blend state.
+const getWriteMask = (blendState) => {
+    let writeMask = 0;
+    if (blendState.redWrite) writeMask |= GPUColorWrite.RED;
+    if (blendState.greenWrite) writeMask |= GPUColorWrite.GREEN;
+    if (blendState.blueWrite) writeMask |= GPUColorWrite.BLUE;
+    if (blendState.alphaWrite) writeMask |= GPUColorWrite.ALPHA;
+    return writeMask;
+};
+
 const _primitiveTopology = [
     'point-list',       // PRIMITIVE_POINTS
     'line-list',        // PRIMITIVE_LINES
@@ -30,6 +55,9 @@ const _primitiveTopology = [
     'triangle-strip',   // PRIMITIVE_TRISTRIP
     undefined           // PRIMITIVE_TRIFAN
 ];
+
+// WebGPU applies a depth bias only to triangles, and requires it to be zero for other topologies
+const _usesDepthBias = topology => topology === 'triangle-list' || topology === 'triangle-strip';
 
 const _blendOperation = [
     'add',              // BLENDEQUATION_ADD
@@ -52,7 +80,11 @@ const _blendFactor = [
     'dst-alpha',            // BLENDMODE_DST_ALPHA
     'one-minus-dst-alpha',  // BLENDMODE_ONE_MINUS_DST_ALPHA
     'constant',             // BLENDMODE_CONSTANT
-    'one-minus-constant'    // BLENDMODE_ONE_MINUS_CONSTANT
+    'one-minus-constant',   // BLENDMODE_ONE_MINUS_CONSTANT
+    'src1',                 // BLENDMODE_SRC1_COLOR
+    'one-minus-src1',       // BLENDMODE_ONE_MINUS_SRC1_COLOR
+    'src1-alpha',           // BLENDMODE_SRC1_ALPHA
+    'one-minus-src1-alpha'  // BLENDMODE_ONE_MINUS_SRC1_ALPHA
 ];
 
 const _compareFunction = [
@@ -109,12 +141,12 @@ const _indexFormat = [
 
 class CacheEntry {
     /**
-     * Render pipeline
+     * Render pipeline, null while it is being created asynchronously.
      *
-     * @type {GPURenderPipeline}
+     * @type {GPURenderPipeline|null}
      * @private
      */
-    pipeline;
+    pipeline = null;
 
     /**
      * The full array of hashes used to lookup the pipeline, used in case of hash collision.
@@ -125,7 +157,10 @@ class CacheEntry {
 }
 
 class WebgpuRenderPipeline extends WebgpuPipeline {
-    lookupHashes = new Uint32Array(15);
+    lookupHashes = new Uint32Array(20);
+
+    // a float view of the lookup hashes, to store the float values by their bits
+    lookupHashesFloat = new Float32Array(this.lookupHashes.buffer);
 
     constructor(device) {
         super(device);
@@ -143,6 +178,96 @@ class WebgpuRenderPipeline extends WebgpuPipeline {
          * @type {Map<number, CacheEntry[]>}
          */
         this.cache = new Map();
+
+        /**
+         * The number of render pipelines requested to be created asynchronously, and not created
+         * yet: those being created, and those waiting to start, see {@link maxAsyncCreations}.
+         *
+         * @type {number}
+         */
+        this.pendingCount = 0;
+
+        /**
+         * The maximum number of render pipelines created asynchronously at the same time. The
+         * browser compiles them in its GPU process, which also composites the page, and with too
+         * many compiling at once it cannot present any update of the page for a while, freezing for
+         * example a progress bar. The ones over the limit wait for others to finish. Defaults to
+         * the number of logical processors, clamped to 4..32: on a 16-core machine, a limit of 16
+         * kept the page responsive at a cost of a few percent of the compile time, while no limit
+         * froze it for over a second.
+         *
+         * @type {number}
+         */
+        this.maxAsyncCreations = Math.min(32, Math.max(4, globalThis.navigator?.hardwareConcurrency ?? 8));
+
+        /**
+         * The number of render pipelines being created asynchronously.
+         *
+         * @type {number}
+         * @private
+         */
+        this._asyncCreations = 0;
+
+        /**
+         * The render pipelines waiting to be created asynchronously, as pairs of a descriptor and
+         * its cache entry.
+         *
+         * @type {Array<GPURenderPipelineDescriptor|CacheEntry>}
+         * @private
+         */
+        this._asyncQueue = [];
+
+        /**
+         * The index of the next pair in {@link _asyncQueue}.
+         *
+         * @type {number}
+         * @private
+         */
+        this._asyncQueueIndex = 0;
+
+        /**
+         * Incremented when the asynchronous creations are abandoned, see {@link clearAsync}, so
+         * that those started before are no longer counted when they finish.
+         *
+         * @type {number}
+         * @private
+         */
+        this._asyncGeneration = 0;
+
+        /**
+         * The number of render pipelines created synchronously, by draws.
+         *
+         * @type {number}
+         */
+        this.syncCount = 0;
+
+        /**
+         * The number of render pipelines requested to be created asynchronously.
+         *
+         * @type {number}
+         */
+        this.asyncCount = 0;
+
+        /**
+         * The number of draws which needed a render pipeline still being created asynchronously,
+         * and created it synchronously, as a draw cannot wait.
+         *
+         * @type {number}
+         */
+        this.pendingHits = 0;
+    }
+
+    /**
+     * Returns the index format a render pipeline depends on. Only a strip topology uses it, as
+     * the strip index format of the pipeline - for any other topology it takes no part, so that
+     * meshes of 16 and 32 bit indices share a pipeline.
+     *
+     * @param {number} primitiveType - The primitive type.
+     * @param {number|undefined} ibFormat - The index buffer format.
+     * @returns {number|undefined} The index format for a strip topology, undefined otherwise.
+     */
+    static stripIndexFormat(primitiveType, ibFormat) {
+        return (primitiveType === PRIMITIVE_LINESTRIP || primitiveType === PRIMITIVE_TRISTRIP) ? ibFormat : undefined;
     }
 
     /**
@@ -160,32 +285,45 @@ class WebgpuRenderPipeline extends WebgpuPipeline {
      * @param {StencilParameters} stencilFront - The stencil state for front faces.
      * @param {StencilParameters} stencilBack - The stencil state for back faces.
      * @param {number} frontFace - The front face.
-     * @returns {GPURenderPipeline} Returns the render pipeline.
+     * @param {boolean} alphaToCoverage - Whether alpha to coverage is requested.
+     * @param {boolean} [async] - True to create a missing pipeline asynchronously, and return null
+     * while it is created. A draw creates a missing one synchronously, as it cannot wait.
+     * @returns {GPURenderPipeline|null} Returns the render pipeline.
      * @private
      */
     get(primitive, vertexFormat0, vertexFormat1, ibFormat, shader, renderTarget, bindGroupFormats, blendState,
-        depthState, cullMode, stencilEnabled, stencilFront, stencilBack, frontFace) {
+        depthState, cullMode, stencilEnabled, stencilFront, stencilBack, frontFace, alphaToCoverage, async = false) {
 
-        Debug.assert(bindGroupFormats.length <= 3);
+        Debug.assert(bindGroupFormats.length <= bindGroupNames.length);
 
         // ibFormat is used only for stripped primitives, clear it otherwise to avoid additional render pipelines
         const primitiveType = primitive.type;
-        if (ibFormat && primitiveType !== PRIMITIVE_LINESTRIP && primitiveType !== PRIMITIVE_TRISTRIP) {
-            ibFormat = undefined;
-        }
+        ibFormat = WebgpuRenderPipeline.stripIndexFormat(primitiveType, ibFormat);
 
         // all bind groups must be set as the WebGPU layout cannot have skipped indices. Not having a bind
         // group would assign incorrect slots to the following bind groups, causing a validation errors.
-        Debug.assert(bindGroupFormats[0], `BindGroup with index 0 [${bindGroupNames[0]}] is not set.`);
-        Debug.assert(bindGroupFormats[1], `BindGroup with index 1 [${bindGroupNames[1]}] is not set.`);
-        Debug.assert(bindGroupFormats[2], `BindGroup with index 2 [${bindGroupNames[2]}] is not set.`);
+        Debug.call(() => {
+            for (let i = 0; i < bindGroupNames.length; i++) {
+                Debug.assert(bindGroupFormats[i], `BindGroup with index ${i} [${bindGroupNames[i]}] is not set.`);
+            }
+        });
+
+        // alpha to coverage is dropped when the render target cannot support it, so the effective
+        // state is what needs to take part in the hash
+        const alphaToCoverageEnabled = this.getAlphaToCoverage(alphaToCoverage, renderTarget);
+
+        // the depth bias takes part in the hash as WebGPU applies it - only to triangles, and with
+        // its constant part truncated to an integer - so that the depth states differing only in
+        // what WebGPU ignores share a pipeline
+        const primitiveTopology = _primitiveTopology[primitiveType];
+        const usesDepthBias = _usesDepthBias(primitiveTopology);
 
         // render pipeline unique hash
-        const lookupHashes = this.lookupHashes;
+        const { lookupHashes, lookupHashesFloat } = this;
         lookupHashes[0] = primitiveType;
         lookupHashes[1] = shader.id;
         lookupHashes[2] = cullMode;
-        lookupHashes[3] = depthState.key;
+        lookupHashes[3] = depthState.func;
         lookupHashes[4] = blendState.key;
         lookupHashes[5] = vertexFormat0?.renderingHash ?? 0;
         lookupHashes[6] = vertexFormat1?.renderingHash ?? 0;
@@ -193,27 +331,39 @@ class WebgpuRenderPipeline extends WebgpuPipeline {
         lookupHashes[8] = bindGroupFormats[0]?.key ?? 0;
         lookupHashes[9] = bindGroupFormats[1]?.key ?? 0;
         lookupHashes[10] = bindGroupFormats[2]?.key ?? 0;
-        lookupHashes[11] = stencilEnabled ? stencilFront.key : 0;
-        lookupHashes[12] = stencilEnabled ? stencilBack.key : 0;
-        lookupHashes[13] = ibFormat ?? 0;
-        lookupHashes[14] = frontFace;
+        lookupHashes[11] = bindGroupFormats[3]?.key ?? 0;
+        lookupHashes[12] = stencilEnabled ? stencilFront.key : 0;
+        lookupHashes[13] = stencilEnabled ? stencilBack.key : 0;
+        lookupHashes[14] = ibFormat ?? 0;
+        lookupHashes[15] = frontFace;
+        lookupHashes[16] = alphaToCoverageEnabled ? 1 : 0;
+        lookupHashes[17] = depthState.write ? 1 : 0;
+        lookupHashes[18] = usesDepthBias ? Math.trunc(depthState.depthBias) : 0;
+        lookupHashesFloat[19] = usesDepthBias ? depthState.depthBiasSlope : 0;
         const hash = hash32Fnv1a(lookupHashes);
 
         // cached pipeline
         let cacheEntries = this.cache.get(hash);
 
         // if we have cache entries, find the exact match, as hash collision can occur
+        let cacheEntry = null;
         if (cacheEntries) {
             for (let i = 0; i < cacheEntries.length; i++) {
                 const entry = cacheEntries[i];
-                if (array.equals(entry.hashes, lookupHashes)) {
-                    return entry.pipeline;
+                if (WebgpuPipeline.keysEqual(entry.hashes, lookupHashes)) {
+                    if (entry.pipeline || async) {
+                        return entry.pipeline;
+                    }
+
+                    // being created asynchronously - a draw cannot wait for it, and creates it now
+                    cacheEntry = entry;
+                    this.pendingHits++;
+                    break;
                 }
             }
         }
 
         // no match or a hash collision, so create a new pipeline
-        const primitiveTopology = _primitiveTopology[primitiveType];
         Debug.assert(primitiveTopology, 'Unsupported primitive topology', primitive);
 
         // pipeline layout
@@ -222,19 +372,27 @@ class WebgpuRenderPipeline extends WebgpuPipeline {
         // vertex buffer layout
         const vertexBufferLayout = this.vertexBufferLayout.get(vertexFormat0, vertexFormat1);
 
-        // pipeline
-        const cacheEntry = new CacheEntry();
-        cacheEntry.hashes = new Uint32Array(lookupHashes);
-        cacheEntry.pipeline = this.create(primitiveTopology, ibFormat, shader, renderTarget, pipelineLayout, blendState,
-            depthState, vertexBufferLayout, cullMode, stencilEnabled, stencilFront, stencilBack, frontFace);
-
         // add to cache
-        if (cacheEntries) {
-            cacheEntries.push(cacheEntry);
-        } else {
-            cacheEntries = [cacheEntry];
+        if (!cacheEntry) {
+            cacheEntry = new CacheEntry();
+            cacheEntry.hashes = new Uint32Array(lookupHashes);
+            if (cacheEntries) {
+                cacheEntries.push(cacheEntry);
+            } else {
+                cacheEntries = [cacheEntry];
+            }
+            this.cache.set(hash, cacheEntries);
         }
-        this.cache.set(hash, cacheEntries);
+
+        if (async) {
+            this.createAsync(cacheEntry, primitiveTopology, ibFormat, shader, renderTarget, pipelineLayout, blendState,
+                depthState, vertexBufferLayout, cullMode, stencilEnabled, stencilFront, stencilBack, frontFace,
+                alphaToCoverageEnabled);
+        } else {
+            cacheEntry.pipeline = this.create(primitiveTopology, ibFormat, shader, renderTarget, pipelineLayout, blendState,
+                depthState, vertexBufferLayout, cullMode, stencilEnabled, stencilFront, stencilBack, frontFace,
+                alphaToCoverageEnabled);
+        }
 
         return cacheEntry.pipeline;
     }
@@ -271,6 +429,41 @@ class WebgpuRenderPipeline extends WebgpuPipeline {
     }
 
     /**
+     * Alpha to coverage is part of the immutable pipeline state on WebGPU, and the spec only allows
+     * it when the render target is multi-sampled and its first color attachment uses a blendable
+     * format with an alpha channel. A material is not tied to a single render target - the same one
+     * can be rendered into a multi-sampled forward pass, a single-sampled pass, or a depth-only
+     * shadow pass with no color attachment at all - so the flag is dropped where it cannot be used
+     * instead of failing the pipeline creation. This matches WebGL, where enabling
+     * SAMPLE_ALPHA_TO_COVERAGE on a single-sampled framebuffer is a no-op rather than an error.
+     *
+     * @param {boolean} alphaToCoverage - The requested alpha to coverage state.
+     * @param {RenderTarget} renderTarget - The render target.
+     * @returns {boolean} Returns true if alpha to coverage can be enabled for the render target.
+     * @private
+     */
+    getAlphaToCoverage(alphaToCoverage, renderTarget) {
+
+        // requires a multi-sampled target - this also covers depth-only passes, which have no
+        // color attachments and are never multi-sampled
+        if (!alphaToCoverage || renderTarget.samples <= 1) {
+            return false;
+        }
+
+        const format = renderTarget.impl.colorAttachments[0]?.format;
+        const supported = _alphaToCoverageFormats.has(format) ||
+            (format === 'rgba32float' && this.device.textureFloatBlendable);
+
+        // this case is worth reporting - alpha to coverage was asked for on a multi-sampled target,
+        // and the only reason it cannot be honored is the format of the first color attachment
+        if (!supported) {
+            Debug.warnOnce('Alpha to coverage is ignored, as it requires the first color attachment to use a blendable format with an alpha channel. Format:', format);
+        }
+
+        return supported;
+    }
+
+    /**
      * @param {DepthState} depthState - The depth state.
      * @param {RenderTarget} renderTarget - The render target.
      * @param {boolean} stencilEnabled - Whether stencil is enabled.
@@ -298,11 +491,13 @@ class WebgpuRenderPipeline extends WebgpuPipeline {
                 const compareTable = this.device.isReverseZ ? _compareFunctionReverseZ : _compareFunction;
                 depthStencil.depthCompare = compareTable[depthState.func];
 
-                const biasAllowed = primitiveTopology === 'triangle-list' || primitiveTopology === 'triangle-strip';
+                // GPUDepthBias is an integer, which the pipeline hash relies on as well
+                const biasAllowed = _usesDepthBias(primitiveTopology);
                 // depth bias sign flips with reverse-z: a positive bias should still push fragments
-                // away from camera (towards far plane), which is towards 0 in reverse-z.
+                // away from camera (towards far plane), which is towards 0 in reverse-z. The sign is a
+                // device-wide constant, so the pipeline hash does not need to include it.
                 const biasSign = this.device.isReverseZ ? -1 : 1;
-                depthStencil.depthBias = biasAllowed ? biasSign * depthState.depthBias : 0;
+                depthStencil.depthBias = biasAllowed ? biasSign * Math.trunc(depthState.depthBias) : 0;
                 depthStencil.depthBiasSlopeScale = biasAllowed ? biasSign * depthState.depthBiasSlope : 0;
             } else {
                 // if render target does not have depth buffer
@@ -314,7 +509,7 @@ class WebgpuRenderPipeline extends WebgpuPipeline {
             if (stencil && stencilEnabled) {
 
                 // Note that WebGPU only supports a single mask, we use the one from front, but not from back.
-                depthStencil.stencilReadMas = stencilFront.readMask;
+                depthStencil.stencilReadMask = stencilFront.readMask;
                 depthStencil.stencilWriteMask = stencilFront.writeMask;
 
                 depthStencil.stencilFront = {
@@ -336,10 +531,28 @@ class WebgpuRenderPipeline extends WebgpuPipeline {
         return depthStencil;
     }
 
-    create(primitiveTopology, ibFormat, shader, renderTarget, pipelineLayout, blendState, depthState, vertexBufferLayout,
-        cullMode, stencilEnabled, stencilFront, stencilBack, frontFace) {
-
-        const wgpu = this.device.wgpu;
+    /**
+     * Returns the descriptor of a render pipeline.
+     *
+     * @param {string} primitiveTopology - The primitive topology.
+     * @param {number|undefined} ibFormat - The index buffer format, for a strip topology.
+     * @param {Shader} shader - The shader.
+     * @param {RenderTarget} renderTarget - The render target.
+     * @param {GPUPipelineLayout} pipelineLayout - The pipeline layout.
+     * @param {BlendState} blendState - The blend state.
+     * @param {DepthState} depthState - The depth state.
+     * @param {GPUVertexBufferLayout[]} vertexBufferLayout - The vertex buffer layout.
+     * @param {number} cullMode - The cull mode.
+     * @param {boolean} stencilEnabled - Whether stencil is enabled.
+     * @param {StencilParameters} stencilFront - The stencil state for front faces.
+     * @param {StencilParameters} stencilBack - The stencil state for back faces.
+     * @param {number} frontFace - The front face.
+     * @param {boolean} alphaToCoverageEnabled - Whether alpha to coverage is enabled.
+     * @returns {GPURenderPipelineDescriptor} The descriptor.
+     * @private
+     */
+    getDescriptor(primitiveTopology, ibFormat, shader, renderTarget, pipelineLayout, blendState, depthState, vertexBufferLayout,
+        cullMode, stencilEnabled, stencilFront, stencilBack, frontFace, alphaToCoverageEnabled) {
 
         /** @type {WebgpuShader} */
         const webgpuShader = shader.impl;
@@ -361,7 +574,8 @@ class WebgpuRenderPipeline extends WebgpuPipeline {
             depthStencil: this.getDepthStencil(depthState, renderTarget, stencilEnabled, stencilFront, stencilBack, primitiveTopology),
 
             multisample: {
-                count: renderTarget.samples
+                count: renderTarget.samples,
+                alphaToCoverageEnabled: alphaToCoverageEnabled
             },
 
             // uniform / texture binding layout
@@ -379,33 +593,129 @@ class WebgpuRenderPipeline extends WebgpuPipeline {
         };
 
         const colorAttachments = renderTarget.impl.colorAttachments;
-        if (colorAttachments.length > 0) {
-
-            // the same write mask is used by all color buffers, to match the WebGL behavior
-            let writeMask = 0;
-            if (blendState.redWrite) writeMask |= GPUColorWrite.RED;
-            if (blendState.greenWrite) writeMask |= GPUColorWrite.GREEN;
-            if (blendState.blueWrite) writeMask |= GPUColorWrite.BLUE;
-            if (blendState.alphaWrite) writeMask |= GPUColorWrite.ALPHA;
-
-            // the same blend state is used by all color buffers, to match the WebGL behavior
-            const blend = this.getBlend(blendState);
-
-            colorAttachments.forEach((attachment) => {
-                desc.fragment.targets.push({
-                    format: attachment.format,
-                    writeMask: writeMask,
-                    blend: blend
-                });
+        if (blendState.usesDualSourceBlending) {
+            Debug.assert(shader.definition.useDualSourceBlending,
+                'A BlendState using secondary source factors requires a dual-source blending shader.');
+            Debug.assert(colorAttachments.length === 1,
+                'Dual-source blending requires exactly one color attachment.');
+        }
+        // each color attachment uses its own blend state - without per-target overrides these all
+        // resolve to the state of the target 0
+        for (let i = 0; i < colorAttachments.length; i++) {
+            const attachmentState = blendState.getAttachment(i, _attachmentBlendState);
+            desc.fragment.targets.push({
+                format: colorAttachments[i].format,
+                writeMask: getWriteMask(attachmentState),
+                blend: this.getBlend(attachmentState)
             });
         }
-
-        WebgpuDebug.validate(this.device);
 
         _pipelineId++;
         DebugHelper.setLabel(desc, `RenderPipelineDescr-${_pipelineId}`);
 
-        const pipeline = wgpu.createRenderPipeline(desc);
+        return desc;
+    }
+
+    /**
+     * Creates a render pipeline asynchronously, which compiles it in parallel with the others
+     * being created, and stores it in the cache entry once created. A failed creation leaves the
+     * entry empty, and the next draw needing it creates it synchronously, reporting the error.
+     *
+     * @param {CacheEntry} cacheEntry - The cache entry.
+     * @param {...any} args - The arguments of {@link WebgpuRenderPipeline#getDescriptor}.
+     * @private
+     */
+    createAsync(cacheEntry, ...args) {
+        this.asyncCount++;
+        this.pendingCount++;
+        const desc = this.getDescriptor(...args);
+        if (this._asyncCreations < this.maxAsyncCreations) {
+            this.startAsync(desc, cacheEntry);
+        } else {
+            this._asyncQueue.push(desc, cacheEntry);
+        }
+    }
+
+    /**
+     * Starts the asynchronous creation of a render pipeline, and once it finishes, the creation of
+     * the next one waiting.
+     *
+     * @param {GPURenderPipelineDescriptor} desc - The descriptor.
+     * @param {CacheEntry} cacheEntry - The cache entry.
+     * @private
+     */
+    startAsync(desc, cacheEntry) {
+        const generation = this._asyncGeneration;
+        this._asyncCreations++;
+        this.device.wgpu.createRenderPipelineAsync(desc).then((pipeline) => {
+            DebugHelper.setLabel(pipeline, `RenderPipeline-async-${desc.label}`);
+            cacheEntry.pipeline ??= pipeline;
+        }, () => {
+            // left to the synchronous creation by the next draw, which reports the error
+        }).finally(() => {
+
+            // a creation started before the device was lost or destroyed is no longer counted
+            if (generation === this._asyncGeneration) {
+                this._asyncCreations--;
+                this.pendingCount--;
+                this.startNextAsync();
+            }
+        });
+    }
+
+    /**
+     * Abandons the asynchronous creations, when the device is lost or destroyed: those waiting are
+     * dropped, and those being created are no longer counted, as their device is gone, and they
+     * may never finish.
+     */
+    clearAsync() {
+        this._asyncGeneration++;
+        this._asyncCreations = 0;
+        this.pendingCount = 0;
+        this._asyncQueue.length = 0;
+        this._asyncQueueIndex = 0;
+    }
+
+    /**
+     * Starts the creation of the next render pipeline waiting, skipping those a draw has created
+     * synchronously meanwhile.
+     *
+     * @private
+     */
+    startNextAsync() {
+        const queue = this._asyncQueue;
+        while (this._asyncQueueIndex < queue.length) {
+            const desc = /** @type {GPURenderPipelineDescriptor} */ (queue[this._asyncQueueIndex]);
+            const cacheEntry = /** @type {CacheEntry} */ (queue[this._asyncQueueIndex + 1]);
+            queue[this._asyncQueueIndex] = queue[this._asyncQueueIndex + 1] = null;
+            this._asyncQueueIndex += 2;
+
+            if (cacheEntry.pipeline) {
+                this.pendingCount--;
+            } else {
+                this.startAsync(desc, cacheEntry);
+                break;
+            }
+        }
+
+        // the queue is empty, reset it
+        if (this._asyncQueueIndex >= queue.length && queue.length > 0) {
+            queue.length = 0;
+            this._asyncQueueIndex = 0;
+        }
+    }
+
+    create(primitiveTopology, ibFormat, shader, renderTarget, pipelineLayout, blendState, depthState, vertexBufferLayout,
+        cullMode, stencilEnabled, stencilFront, stencilBack, frontFace, alphaToCoverageEnabled) {
+
+        this.syncCount++;
+        const desc = this.getDescriptor(primitiveTopology, ibFormat, shader, renderTarget, pipelineLayout, blendState,
+            depthState, vertexBufferLayout, cullMode, stencilEnabled, stencilFront, stencilBack, frontFace,
+            alphaToCoverageEnabled);
+
+        WebgpuDebug.validate(this.device);
+
+        const pipeline = this.device.wgpu.createRenderPipeline(desc);
 
         DebugHelper.setLabel(pipeline, `RenderPipeline-${_pipelineId}`);
         Debug.trace(TRACEID_RENDERPIPELINE_ALLOC, `Alloc: Id ${_pipelineId}, stack: ${DebugGraphics.toString()}`, desc);

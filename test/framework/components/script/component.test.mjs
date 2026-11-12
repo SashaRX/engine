@@ -21,14 +21,14 @@ describe('ScriptComponent', function () {
         window.initializeCalls = [];
 
         const assets = scripts.map(script => new Asset(`${script}.js`, 'script', {
-            url: `http://localhost:3000/test/assets/scripts/${script}.js`
+            url: `/test/assets/scripts/${script}.js`
         }));
         assets.forEach((asset) => {
             asset.preload = asset.name !== 'loadedLater.js';
             app.assets.add(asset);
         });
         app.preload(function () {
-            app.scenes.loadScene('http://localhost:3000/test/assets/scenes/scene1.json', function () {
+            app.scenes.loadScene('/test/assets/scenes/scene1.json', function () {
                 app.start();
                 done();
             });
@@ -42,7 +42,7 @@ describe('ScriptComponent', function () {
     });
 
     function checkInitCall(entity, index, text) {
-        expect(window.initializeCalls[index]).to.equal(`${entity.getGuid()} ${text}`);
+        expect(window.initializeCalls[index]).to.equal(`${entity.guid} ${text}`);
     }
 
     it('script assets are loaded', function () {
@@ -233,7 +233,7 @@ describe('ScriptComponent', function () {
         checkInitCall(clone, 7, 'postInitialize scriptB');
     });
 
-    it('all initialize calls are before postInitialize calls when enabling entity from inside initilize function', function () {
+    it('all initialize calls are before postInitialize calls when enabling entity from inside initialize function', function () {
         const e = new Entity('entity to enable');
         e.enabled = false;
 
@@ -265,7 +265,7 @@ describe('ScriptComponent', function () {
                 enabler: {
                     enabled: true,
                     attributes: {
-                        entityToEnable: e.getGuid()
+                        entityToEnable: e.guid
                     }
                 }
             }
@@ -282,7 +282,7 @@ describe('ScriptComponent', function () {
         checkInitCall(enabler, 5, 'postInitialize enabler');
     });
 
-    it('all initialize calls are before postInitialize calls for entity whose script component is enabled inside initilize function', function () {
+    it('all initialize calls are before postInitialize calls for entity whose script component is enabled inside initialize function', function () {
         const e = new Entity('entity to enable');
 
         e.addComponent('script', {
@@ -313,7 +313,7 @@ describe('ScriptComponent', function () {
                 enabler: {
                     enabled: true,
                     attributes: {
-                        entityToEnable: e.getGuid()
+                        entityToEnable: e.guid
                     }
                 }
             }
@@ -362,7 +362,7 @@ describe('ScriptComponent', function () {
                 enabler: {
                     enabled: true,
                     attributes: {
-                        entityToEnable: e.getGuid()
+                        entityToEnable: e.guid
                     }
                 }
             }
@@ -500,7 +500,7 @@ describe('ScriptComponent', function () {
                 postCloner: {
                     enabled: true,
                     attributes: {
-                        entityToClone: src.getGuid()
+                        entityToClone: src.guid
                     }
                 }
             }
@@ -525,7 +525,7 @@ describe('ScriptComponent', function () {
                 scriptWithAttributes: {
                     enabled: true,
                     attributes: {
-                        attribute1: e2.getGuid()
+                        attribute1: e2.guid
                     }
                 }
             }
@@ -552,7 +552,7 @@ describe('ScriptComponent', function () {
                 scriptWithAttributes: {
                     enabled: true,
                     attributes: {
-                        attribute1: e2.getGuid()
+                        attribute1: e2.guid
                     }
                 }
             }
@@ -577,7 +577,7 @@ describe('ScriptComponent', function () {
                 scriptWithAttributes: {
                     enabled: true,
                     attributes: {
-                        attribute1: e2.getGuid()
+                        attribute1: e2.guid
                     }
                 }
             }
@@ -601,7 +601,7 @@ describe('ScriptComponent', function () {
                 scriptWithAttributes: {
                     enabled: false,
                     attributes: {
-                        attribute1: e2.getGuid()
+                        attribute1: e2.guid
                     }
                 }
             }
@@ -625,7 +625,7 @@ describe('ScriptComponent', function () {
                 scriptWithAttributes: {
                     enabled: true,
                     attributes: {
-                        attribute1: e2.getGuid()
+                        attribute1: e2.guid
                     }
                 }
             }
@@ -654,7 +654,7 @@ describe('ScriptComponent', function () {
                 scriptWithAttributes: {
                     enabled: true,
                     attributes: {
-                        attribute1: e2.getGuid()
+                        attribute1: e2.guid
                     }
                 }
             }
@@ -682,7 +682,7 @@ describe('ScriptComponent', function () {
                 scriptWithAttributes: {
                     enabled: true,
                     attributes: {
-                        attribute1: e2.getGuid()
+                        attribute1: e2.guid
                     }
                 }
             }
@@ -710,7 +710,7 @@ describe('ScriptComponent', function () {
                 scriptWithAttributes: {
                     enabled: false,
                     attributes: {
-                        attribute1: e2.getGuid()
+                        attribute1: e2.guid
                     }
                 }
             }
@@ -783,7 +783,7 @@ describe('ScriptComponent', function () {
             expect(app.root.findByName(name)).to.not.exist;
         });
 
-        app.loadSceneHierarchy('http://localhost:3000/test/assets/scenes/scene1.json', function () {
+        app.loadSceneHierarchy('/test/assets/scenes/scene1.json', function () {
 
             // verify entities are loaded
             names.forEach(function (name) {
@@ -862,11 +862,11 @@ describe('ScriptComponent', function () {
                     attributes: {
                         attribute3: {
                             fieldNumber: 1,
-                            fieldEntity: child.getGuid()
+                            fieldEntity: child.guid
                         },
                         attribute4: [{
                             fieldNumber: 2,
-                            fieldEntity: child.getGuid()
+                            fieldEntity: child.guid
                         }]
                     }
                 }
@@ -1354,6 +1354,355 @@ describe('ScriptComponent', function () {
         app.assets.load(asset);
     });
 
+    it('get() returns null for a script that is awaiting its script type', function () {
+        const e = new Entity();
+        e.addComponent('script');
+        e.script.create('notRegisteredYet');
+
+        expect(e.script._scriptsIndex.notRegisteredYet.awaiting).to.equal(true);
+        expect(e.script.get('notRegisteredYet')).to.be.null;
+    });
+
+    it('cloning an entity preserves scripts that are awaiting their script type', function () {
+        const e = new Entity();
+        e.addComponent('script', {
+            enabled: true,
+            order: ['scriptA', 'loadedLater', 'scriptB'],
+            scripts: {
+                scriptA: { enabled: true, attributes: {} },
+                loadedLater: { enabled: false, attributes: { disableEntity: true } },
+                scriptB: { enabled: true, attributes: {} }
+            }
+        });
+        app.root.addChild(e);
+
+        const clone = e.clone();
+        app.root.addChild(clone);
+
+        const indexData = clone.script._scriptsIndex.loadedLater;
+        expect(indexData).to.exist;
+        expect(indexData.awaiting).to.equal(true);
+        expect(indexData.ind).to.equal(e.script._scriptsIndex.loadedLater.ind);
+
+        // the data the script will be created from once its type is registered is preserved too
+        expect(clone.script._scriptsData.loadedLater.enabled).to.equal(false);
+        expect(clone.script._scriptsData.loadedLater.attributes.disableEntity).to.equal(true);
+    });
+
+    it('cloning an entity keeps the relative order of consecutive awaiting scripts', function () {
+        const e = new Entity();
+        const order = ['scriptA', 'awaitingOne', 'awaitingTwo', 'scriptB', 'awaitingThree'];
+        const scripts = {};
+        order.forEach((name) => {
+            scripts[name] = { enabled: true, attributes: {} };
+        });
+        e.addComponent('script', { enabled: true, order: order, scripts: scripts });
+        app.root.addChild(e);
+
+        const clone = e.clone();
+        app.root.addChild(clone);
+
+        // initializeComponentData creates the scripts in `order`, so this is the order the
+        // clone was rebuilt with
+        expect(clone.script._declarationOrder).to.deep.equal(order);
+    });
+
+    it('cloning an entity keeps the declared order of awaiting scripts with integer-like names', function () {
+        const e = new Entity();
+        const order = ['scriptA', '10', '2', 'scriptB'];
+        const scripts = {};
+        order.forEach((name) => {
+            scripts[name] = { enabled: true, attributes: {} };
+        });
+        e.addComponent('script', { enabled: true, order: order, scripts: scripts });
+        app.root.addChild(e);
+
+        const clone = e.clone();
+        app.root.addChild(clone);
+
+        // integer-like keys are enumerated first, so the key order of `_scriptsIndex` is not the
+        // declared order here
+        expect(clone.script._declarationOrder).to.deep.equal(order);
+    });
+
+    it('cloning an entity places an awaiting script after the script it was declared after', function () {
+        const e = new Entity();
+        e.addComponent('script', {
+            enabled: true,
+            order: ['scriptA', 'scriptB', 'awaitingMoved'],
+            scripts: {
+                scriptA: { enabled: true, attributes: {} },
+                scriptB: { enabled: true, attributes: {} },
+                awaitingMoved: { enabled: true, attributes: {} }
+            }
+        });
+        app.root.addChild(e);
+
+        // the awaiting script was declared after scriptB, which now runs first
+        e.script.move('scriptB', 0);
+
+        const clone = e.clone();
+        app.root.addChild(clone);
+
+        expect(clone.script._declarationOrder).to.deep.equal(['scriptB', 'awaitingMoved', 'scriptA']);
+    });
+
+    it('scripts awaiting their script type are created on a clone when the type is registered', function (done) {
+        const e = new Entity();
+        e.addComponent('script', {
+            enabled: true,
+            order: ['scriptA', 'loadedLater', 'scriptB'],
+            scripts: {
+                scriptA: { enabled: true, attributes: {} },
+                loadedLater: { enabled: true, attributes: {} },
+                scriptB: { enabled: true, attributes: {} }
+            }
+        });
+        app.root.addChild(e);
+
+        const clone = e.clone();
+        app.root.addChild(clone);
+
+        expect(clone.script.loadedLater).to.not.exist;
+
+        const asset = app.assets.find('loadedLater.js', 'script');
+        app.scripts.on('add:loadedLater', function () {
+            setTimeout(function () {
+                expect(e.script.loadedLater).to.exist;
+                expect(clone.script.loadedLater).to.exist;
+                const names = clone.script.scripts.map(s => s.__scriptType.__name);
+                expect(names).to.deep.equal(['scriptA', 'loadedLater', 'scriptB']);
+                done();
+            }, 100);
+        });
+
+        app.assets.load(asset);
+    });
+
+    it('a disabled script added to the registry later stays disabled and is not initialized', function (done) {
+        const e = new Entity();
+        e.addComponent('script', {
+            enabled: true,
+            order: ['loadedLater'],
+            scripts: {
+                loadedLater: {
+                    enabled: false,
+                    attributes: {}
+                }
+            }
+        });
+
+        app.root.addChild(e);
+
+        const asset = app.assets.find('loadedLater.js', 'script');
+        app.scripts.on('add:loadedLater', function () {
+            setTimeout(function () {
+                expect(e.script.loadedLater).to.exist;
+                expect(e.script.loadedLater.enabled).to.equal(false);
+                expect(window.initializeCalls.length).to.equal(0);
+                done();
+            }, 100);
+        });
+
+        app.assets.load(asset);
+    });
+
+    it('a script created before its type is registered keeps the options it was created with', function (done) {
+        const e = new Entity();
+        e.addComponent('script', { enabled: true });
+
+        // declared through create() rather than component data, so there is no `_scriptsData`
+        e.script.create('loadedLater', {
+            enabled: false,
+            attributes: { disableEntity: true },
+            properties: { customValue: 42 }
+        });
+        app.root.addChild(e);
+
+        const asset = app.assets.find('loadedLater.js', 'script');
+        app.scripts.on('add:loadedLater', function () {
+            setTimeout(function () {
+                expect(e.script.loadedLater).to.exist;
+                expect(e.script.loadedLater.enabled).to.equal(false);
+                expect(e.script.loadedLater.disableEntity).to.equal(true);
+                expect(e.script.loadedLater.customValue).to.equal(42);
+                expect(window.initializeCalls.length).to.equal(0);
+                done();
+            }, 100);
+        });
+
+        app.assets.load(asset);
+    });
+
+    it('a clone keeps the options an awaiting script was created with', function (done) {
+        const e = new Entity();
+        e.addComponent('script', { enabled: true });
+        e.script.create('loadedLater', { enabled: false, attributes: { disableEntity: true } });
+        app.root.addChild(e);
+
+        const clone = e.clone();
+        app.root.addChild(clone);
+
+        const asset = app.assets.find('loadedLater.js', 'script');
+        app.scripts.on('add:loadedLater', function () {
+            setTimeout(function () {
+                expect(clone.script.loadedLater).to.exist;
+                expect(clone.script.loadedLater.enabled).to.equal(false);
+                expect(clone.script.loadedLater.disableEntity).to.equal(true);
+                done();
+            }, 100);
+        });
+
+        app.assets.load(asset);
+    });
+
+    it('recreating a destroyed awaiting script uses the newly supplied options', function (done) {
+        const e = new Entity();
+        e.addComponent('script', {
+            enabled: true,
+            order: ['loadedLater'],
+            scripts: {
+                loadedLater: {
+                    enabled: true,
+                    attributes: { disableEntity: true }
+                }
+            }
+        });
+        app.root.addChild(e);
+
+        // destroy() leaves the component data entry behind, so the replacement declaration must
+        // not be read out of it
+        expect(e.script.destroy('loadedLater')).to.equal(true);
+        e.script.create('loadedLater', { enabled: false, attributes: { disableEntity: false } });
+
+        const clone = e.clone();
+        app.root.addChild(clone);
+
+        const asset = app.assets.find('loadedLater.js', 'script');
+        app.scripts.on('add:loadedLater', function () {
+            setTimeout(function () {
+                expect(e.script.loadedLater.enabled).to.equal(false);
+                expect(e.script.loadedLater.disableEntity).to.equal(false);
+                expect(clone.script.loadedLater.enabled).to.equal(false);
+                expect(clone.script.loadedLater.disableEntity).to.equal(false);
+                expect(window.initializeCalls.length).to.equal(0);
+                done();
+            }, 100);
+        });
+
+        app.assets.load(asset);
+    });
+
+    it('attributes of a script added to the registry later are not shared between components', function (done) {
+        // declares attribute data for the script
+        const e1 = new Entity();
+        e1.addComponent('script', {
+            enabled: true,
+            order: ['loadedLater'],
+            scripts: {
+                loadedLater: {
+                    enabled: true,
+                    attributes: { disableScriptInstance: true }
+                }
+            }
+        });
+        app.root.addChild(e1);
+
+        // requests the same script without any attribute data
+        const e2 = new Entity();
+        e2.addComponent('script', { enabled: true });
+        e2.script.create('loadedLater');
+        app.root.addChild(e2);
+
+        const asset = app.assets.find('loadedLater.js', 'script');
+        app.scripts.on('add:loadedLater', function () {
+            setTimeout(function () {
+                expect(e1.script.loadedLater.disableScriptInstance).to.equal(true);
+                expect(e2.script.loadedLater.disableScriptInstance).to.equal(false);
+                done();
+            }, 100);
+        });
+
+        app.assets.load(asset);
+    });
+
+    it('scripts added to the registry later are created in their declared order', function (done) {
+        const e = new Entity();
+        const order = ['scriptA', 'awaitingOne', 'awaitingTwo', 'scriptB', 'awaitingThree'];
+        const scripts = {};
+        order.forEach((name) => {
+            scripts[name] = { enabled: true, attributes: {} };
+        });
+        e.addComponent('script', { enabled: true, order: order, scripts: scripts });
+        app.root.addChild(e);
+
+        expect(e.script.scripts.map(s => s.__scriptType.__name)).to.deep.equal(['scriptA', 'scriptB']);
+
+        // register the missing script types out of their declared order
+        createScript('awaitingThree', app);
+        createScript('awaitingOne', app);
+        createScript('awaitingTwo', app);
+
+        setTimeout(function () {
+            expect(e.script.scripts.map(s => s.__scriptType.__name)).to.deep.equal(order);
+            done();
+        }, 100);
+    });
+
+    it('a script added to the registry later follows a preceding script that has been moved', function (done) {
+        const e = new Entity();
+        e.addComponent('script', {
+            enabled: true,
+            order: ['scriptA', 'scriptB', 'awaitingAfterMove'],
+            scripts: {
+                scriptA: { enabled: true, attributes: {} },
+                scriptB: { enabled: true, attributes: {} },
+                awaitingAfterMove: { enabled: true, attributes: {} }
+            }
+        });
+        app.root.addChild(e);
+
+        // the awaiting script is declared after scriptB, which now runs first
+        e.script.move('scriptB', 0);
+
+        createScript('awaitingAfterMove', app);
+
+        setTimeout(function () {
+            const names = e.script.scripts.map(s => s.__scriptType.__name);
+            expect(names).to.deep.equal(['scriptB', 'awaitingAfterMove', 'scriptA']);
+            done();
+        }, 100);
+    });
+
+    it('a clone ends up with the same script order as its source when an awaiting type is registered', function (done) {
+        const e = new Entity();
+        e.addComponent('script', {
+            enabled: true,
+            order: ['scriptA', 'scriptB', 'awaitingParity'],
+            scripts: {
+                scriptA: { enabled: true, attributes: {} },
+                scriptB: { enabled: true, attributes: {} },
+                awaitingParity: { enabled: true, attributes: {} }
+            }
+        });
+        app.root.addChild(e);
+
+        // clone a component whose scripts have been reordered and that has a script pending
+        e.script.move('scriptB', 0);
+
+        const clone = e.clone();
+        app.root.addChild(clone);
+
+        createScript('awaitingParity', app);
+
+        setTimeout(function () {
+            const names = ent => ent.script.scripts.map(s => s.__scriptType.__name);
+            expect(names(e)).to.deep.equal(['scriptB', 'awaitingParity', 'scriptA']);
+            expect(names(clone)).to.deep.equal(names(e));
+            done();
+        }, 100);
+    });
+
     it('destroying entity during update stops updating the rest of the entity\'s scripts', function () {
         const e = new Entity();
         e.addComponent('script', {
@@ -1662,7 +2011,7 @@ describe('ScriptComponent', function () {
         app.root.children[0].destroy();
 
         window.initializeCalls.length = 0;
-        app.scenes.loadScene('http://localhost:3000/test/assets/scenes/scene2.json', function () {
+        app.scenes.loadScene('/test/assets/scenes/scene2.json', function () {
             const e = app.root.findByName('A');
             const other = app.root.findByName('B');
 
@@ -1782,7 +2131,7 @@ describe('ScriptComponent', function () {
         app.root.children[0].destroy();
 
         // load scene
-        app.loadSceneHierarchy('http://localhost:3000/test/assets/scenes/scene3.json', function () {
+        app.loadSceneHierarchy('/test/assets/scenes/scene3.json', function () {
             window.initializeCalls.length = 0;
             app.update();
 
@@ -1891,11 +2240,11 @@ describe('ScriptComponent', function () {
     it('update and postUpdate are not called on script instance that was disabled during update loop', function () {
         const DisableDuringUpdateLoop = createScript('disableDuringUpdateLoop');
         DisableDuringUpdateLoop.prototype.update = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} update disableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} update disableDuringUpdateLoop`);
             this.entity.script.scriptA.enabled = false;
         };
         DisableDuringUpdateLoop.prototype.postUpdate = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} postUpdate disableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} postUpdate disableDuringUpdateLoop`);
         };
 
         const a = new Entity();
@@ -1927,11 +2276,11 @@ describe('ScriptComponent', function () {
     it('update and postUpdate are not called on script component that was disabled during update loop', function () {
         const DisableDuringUpdateLoop = createScript('disableDuringUpdateLoop');
         DisableDuringUpdateLoop.prototype.update = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} update disableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} update disableDuringUpdateLoop`);
             this.entity.script.enabled = false;
         };
         DisableDuringUpdateLoop.prototype.postUpdate = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} postUpdate disableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} postUpdate disableDuringUpdateLoop`);
         };
 
         const a = new Entity();
@@ -1964,11 +2313,11 @@ describe('ScriptComponent', function () {
     it('update and postUpdate are not called on entity that was disabled during update loop', function () {
         const DisableDuringUpdateLoop = createScript('disableDuringUpdateLoop');
         DisableDuringUpdateLoop.prototype.update = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} update disableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} update disableDuringUpdateLoop`);
             this.entity.enabled = false;
         };
         DisableDuringUpdateLoop.prototype.postUpdate = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} postUpdate disableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} postUpdate disableDuringUpdateLoop`);
         };
 
         const a = new Entity();
@@ -2001,7 +2350,7 @@ describe('ScriptComponent', function () {
     it('postUpdate not called on script instance that was disabled during post update loop', function () {
         const DisableDuringUpdateLoop = createScript('disableDuringUpdateLoop');
         DisableDuringUpdateLoop.prototype.postUpdate = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} postUpdate disableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} postUpdate disableDuringUpdateLoop`);
             this.entity.script.scriptA.enabled = false;
         };
 
@@ -2034,7 +2383,7 @@ describe('ScriptComponent', function () {
     it('postUpdate not called on script component that was disabled during post update loop', function () {
         const DisableDuringUpdateLoop = createScript('disableDuringUpdateLoop');
         DisableDuringUpdateLoop.prototype.postUpdate = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} postUpdate disableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} postUpdate disableDuringUpdateLoop`);
             this.entity.script.enabled = false;
         };
 
@@ -2069,7 +2418,7 @@ describe('ScriptComponent', function () {
     it('postUpdate not called on entity that was disabled during post update loop', function () {
         const DisableDuringUpdateLoop = createScript('disableDuringUpdateLoop');
         DisableDuringUpdateLoop.prototype.postUpdate = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} postUpdate disableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} postUpdate disableDuringUpdateLoop`);
             this.entity.enabled = false;
         };
 
@@ -2104,13 +2453,13 @@ describe('ScriptComponent', function () {
     it('update not called second time on script instance that was re-enabled during the same frame', function () {
         const DisableDuringUpdateLoop = createScript('disableDuringUpdateLoop');
         DisableDuringUpdateLoop.prototype.update = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} update disableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} update disableDuringUpdateLoop`);
             this.entity.script.disableDuringUpdateLoop.enabled = false;
         };
 
         const EnableDuringUpdateLoop = createScript('enableDuringUpdateLoop');
         EnableDuringUpdateLoop.prototype.update = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} update enableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} update enableDuringUpdateLoop`);
             this.entity.script.disableDuringUpdateLoop.enabled = true; // enable first script back
         };
 
@@ -2141,13 +2490,13 @@ describe('ScriptComponent', function () {
     it('post update not called second time on script instance that was re-enabled during the same frame', function () {
         const DisableDuringUpdateLoop = createScript('disableDuringUpdateLoop');
         DisableDuringUpdateLoop.prototype.postUpdate = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} postUpdate disableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} postUpdate disableDuringUpdateLoop`);
             this.entity.script.disableDuringUpdateLoop.enabled = false;
         };
 
         const EnableDuringUpdateLoop = createScript('enableDuringUpdateLoop');
         EnableDuringUpdateLoop.prototype.postUpdate = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} postUpdate enableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} postUpdate enableDuringUpdateLoop`);
             this.entity.script.disableDuringUpdateLoop.enabled = true; // enable first script back
         };
 
@@ -2178,13 +2527,13 @@ describe('ScriptComponent', function () {
     it('update not called second time on script instance whose script component was re-enabled during the same frame', function () {
         const DisableDuringUpdateLoop = createScript('disableDuringUpdateLoop');
         DisableDuringUpdateLoop.prototype.update = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} update disableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} update disableDuringUpdateLoop`);
             this.entity.script.enabled = false;
         };
 
         const EnableDuringUpdateLoop = createScript('enableDuringUpdateLoop');
         EnableDuringUpdateLoop.prototype.update = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} update enableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} update enableDuringUpdateLoop`);
             const e = app.root.findByName('a');
             e.script.enabled = true; // enable first script component back
         };
@@ -2225,13 +2574,13 @@ describe('ScriptComponent', function () {
     it('post update not called second time on script instance whose script component was re-enabled during the same frame', function () {
         const DisableDuringUpdateLoop = createScript('disableDuringUpdateLoop');
         DisableDuringUpdateLoop.prototype.postUpdate = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} postUpdate disableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} postUpdate disableDuringUpdateLoop`);
             this.entity.script.enabled = false;
         };
 
         const EnableDuringUpdateLoop = createScript('enableDuringUpdateLoop');
         EnableDuringUpdateLoop.prototype.postUpdate = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} postUpdate enableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} postUpdate enableDuringUpdateLoop`);
             const e = app.root.findByName('a');
             e.script.enabled = true; // enable first script component back
         };
@@ -2366,7 +2715,7 @@ describe('ScriptComponent', function () {
     it('update and post update are called on the same frame for child entities that become enabled during a parent\s update', function () {
         const EnableDuringUpdateLoop = createScript('enableDuringUpdateLoop');
         EnableDuringUpdateLoop.prototype.update = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} update enableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} update enableDuringUpdateLoop`);
             const e = app.root.findByName('b');
             e.enabled = true;
         };
@@ -2421,7 +2770,7 @@ describe('ScriptComponent', function () {
     it('update is called on the next frame and post update on the same frame for parent entities whose script component becomes enabled during a child\s update', function () {
         const EnableDuringUpdateLoop = createScript('enableDuringUpdateLoop');
         EnableDuringUpdateLoop.prototype.update = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} update enableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} update enableDuringUpdateLoop`);
             const e = app.root.findByName('a');
             e.script.enabled = true;
         };
@@ -2482,7 +2831,7 @@ describe('ScriptComponent', function () {
     it('update is called on the same frame for subsequent script instance that gets enabled during update loop', function () {
         const EnableDuringUpdateLoop = createScript('enableDuringUpdateLoop');
         EnableDuringUpdateLoop.prototype.update = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} update enableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} update enableDuringUpdateLoop`);
             this.entity.script.scriptB.enabled = true;
         };
 
@@ -2522,7 +2871,7 @@ describe('ScriptComponent', function () {
     it('update is called on the next frame and post update on the same frame for previous script instance that gets enabled during update loop', function () {
         const EnableDuringUpdateLoop = createScript('enableDuringUpdateLoop');
         EnableDuringUpdateLoop.prototype.update = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} update enableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} update enableDuringUpdateLoop`);
             this.entity.script.scriptB.enabled = true;
         };
 
@@ -2571,7 +2920,7 @@ describe('ScriptComponent', function () {
     it('post update is called on the same frame for subsequent script instance that gets enabled during post update loop', function () {
         const EnableDuringUpdateLoop = createScript('enableDuringUpdateLoop');
         EnableDuringUpdateLoop.prototype.postUpdate = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} post update enableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} post update enableDuringUpdateLoop`);
             this.entity.script.scriptB.enabled = true;
         };
 
@@ -2610,7 +2959,7 @@ describe('ScriptComponent', function () {
     it('post update is called on the next frame previous script instance that gets enabled during post update loop', function () {
         const EnableDuringUpdateLoop = createScript('enableDuringUpdateLoop');
         EnableDuringUpdateLoop.prototype.postUpdate = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} post update enableDuringUpdateLoop`);
+            window.initializeCalls.push(`${this.entity.guid} post update enableDuringUpdateLoop`);
             this.entity.script.scriptB.enabled = true;
         };
 
@@ -2881,10 +3230,10 @@ describe('ScriptComponent', function () {
         // so that 'swap' is triggered
         const NewScriptA = createScript('scriptA');
         NewScriptA.prototype.update = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} update new scriptA`);
+            window.initializeCalls.push(`${this.entity.guid} update new scriptA`);
         };
         NewScriptA.prototype.postUpdate = function () {
-            window.initializeCalls.push(`${this.entity.getGuid()} postUpdate new scriptA`);
+            window.initializeCalls.push(`${this.entity.guid} postUpdate new scriptA`);
         };
         NewScriptA.prototype.swap = function () {
         };
@@ -2905,7 +3254,7 @@ describe('ScriptComponent', function () {
         });
     });
 
-    it('pc.ScriptComponent#has', function () {
+    it('ScriptComponent#has', function () {
         const e = new Entity();
         e.addComponent('script', {
             enabled: true,
@@ -2927,6 +3276,31 @@ describe('ScriptComponent', function () {
         expect(e.script.has('')).to.equal(false);
         expect(e.script.has(undefined)).to.equal(false);
         expect(e.script.has(null)).to.equal(false);
+    });
+
+    it('cloning an entity does not share the attribute data of an ESM script with the clone', function () {
+        class CloneAttributes extends Script {
+            static scriptName = 'cloneAttributes';
+        }
+
+        app.scripts.addSchema('cloneAttributes', { attributes: { speed: { type: 'number' } } });
+
+        const e = new Entity();
+        e.addComponent('script', { enabled: true });
+        e.script.create(CloneAttributes, { attributes: { speed: 42 } });
+        app.root.addChild(e);
+
+        const clone = e.clone();
+        app.root.addChild(clone);
+
+        const sourceData = e.script._attributeDataMap.get('cloneAttributes');
+        const cloneData = clone.script._scriptsData.cloneAttributes.attributes;
+
+        expect(cloneData).to.deep.equal({ speed: 42 });
+        expect(cloneData).to.not.equal(sourceData);
+
+        cloneData.speed = 7;
+        expect(sourceData.speed).to.equal(42);
     });
 
     it('warns when an ESM Script class does not have a static "scriptName" property', function () {
@@ -2960,6 +3334,37 @@ describe('ScriptComponent', function () {
 
         expect(a.script.has('testScript')).to.equal(true);
         expect(a.script.has('myTestScript')).to.equal(false);
+    });
+
+    it('returns null and does not index the script when its name cannot be resolved', function () {
+        // an anonymous class with neither scriptName nor an inferable name
+        const Anonymous = (() => class extends Script {})();
+        Object.defineProperty(Anonymous, 'name', { value: '' });
+
+        const a = new Entity();
+        a.addComponent('script', { enabled: true });
+        const instance = a.script.create(Anonymous);
+
+        expect(instance).to.equal(null);
+        expect(a.script.undefined).to.equal(undefined);
+        expect(a.script._scriptsIndex.undefined).to.equal(undefined);
+    });
+
+    it('does not throw when an ESM script has attribute data but no schema', function () {
+        class NoSchemaScript extends Script {
+            static scriptName = 'noSchemaScript';
+        }
+
+        const e = new Entity();
+        e.addComponent('script', { enabled: true });
+        app.root.addChild(e);
+
+        expect(() => e.script.create(NoSchemaScript, { attributes: { speed: 42 } })).to.not.throw();
+        expect(e.script.noSchemaScript).to.exist;
+        expect(e.script.noSchemaScript.speed).to.not.exist;
+        expect(Debug._loggedMessages.has(
+            'No schema exists for the script \'noSchemaScript\'. A schema must exist for data to be instantiated on the script.'
+        )).to.equal(true);
     });
 
     it('does not warn when a ScriptType is used', function () {

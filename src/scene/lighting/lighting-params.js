@@ -1,6 +1,6 @@
 import { math } from '../../core/math/math.js';
 import { Vec3 } from '../../core/math/vec3.js';
-import { SHADOW_PCF3_32F } from '../constants.js';
+import { LIGHTSHAPE_DISK, LIGHTSHAPE_RECT, LIGHTSHAPE_SPHERE, SHADOW_PCF3_32F } from '../constants.js';
 
 /**
  * Lighting parameters, allow configuration of the global lighting parameters. For details see
@@ -13,10 +13,22 @@ class LightingParams {
     _areaLightsEnabled = false;
 
     /** @private */
+    _areaLightRectEnabled = true;
+
+    /** @private */
+    _areaLightDiskEnabled = true;
+
+    /** @private */
+    _areaLightSphereEnabled = true;
+
+    /** @private */
     _cells = new Vec3(10, 3, 10);
 
     /** @private */
     _maxLightsPerCell = 255;
+
+    /** @private */
+    _maxLights = 255;
 
     /** @private */
     _shadowsEnabled = true;
@@ -69,6 +81,7 @@ class LightingParams {
         this.shadowAtlasResolution = render.lightingShadowAtlasResolution ?? this.shadowAtlasResolution;
         this.cookieAtlasResolution = render.lightingCookieAtlasResolution ?? this.cookieAtlasResolution;
         this.maxLightsPerCell = render.lightingMaxLightsPerCell ?? this.maxLightsPerCell;
+        this.maxLights = render.lightingMaxLights ?? this.maxLights;
         this.shadowType = render.lightingShadowType ?? this.shadowType;
         if (render.lightingCells) {
             this.cells = new Vec3(render.lightingCells);
@@ -111,6 +124,28 @@ class LightingParams {
      */
     get maxLightsPerCell() {
         return this._maxLightsPerCell;
+    }
+
+    /**
+     * Sets the maximum number of lights the clustered lighting can use in a single frame. Lights
+     * over this limit are ignored, and a warning is reported.
+     *
+     * Values up to 255 store the light index in the light grid using 8 bits, larger values use 16
+     * bits and so double the size of the texture the grid is stored in. Defaults to 255.
+     *
+     * @type {number}
+     */
+    set maxLights(value) {
+        this._maxLights = math.clamp(value, 1, Math.min(65535, this._maxTextureSize - 1));
+    }
+
+    /**
+     * Gets the maximum number of lights the clustered lighting can use in a single frame.
+     *
+     * @type {number}
+     */
+    get maxLights() {
+        return this._maxLights;
     }
 
     /**
@@ -231,6 +266,97 @@ class LightingParams {
      */
     get areaLightsEnabled() {
         return this._areaLightsEnabled;
+    }
+
+    /**
+     * Sets whether clustered lighting supports area lights of rectangular shape
+     * ({@link LIGHTSHAPE_RECT}). The lit shaders only include the code of the enabled area light
+     * shapes, so disabling the shapes a scene does not use makes them faster to compile, most
+     * noticeably on Windows. Area lights of a disabled shape are rendered as punctual lights. Only
+     * used when {@link LightingParams#areaLightsEnabled} is true. Defaults to true.
+     *
+     * @type {boolean}
+     */
+    set areaLightRectEnabled(value) {
+        if (this._areaLightRectEnabled !== value) {
+            this._areaLightRectEnabled = value;
+
+            // lit shaders need to be rebuilt
+            this._dirtyLightsFnc();
+        }
+    }
+
+    /**
+     * Gets whether clustered lighting supports area lights of rectangular shape.
+     *
+     * @type {boolean}
+     */
+    get areaLightRectEnabled() {
+        return this._areaLightRectEnabled;
+    }
+
+    /**
+     * Sets whether clustered lighting supports area lights of disk shape ({@link LIGHTSHAPE_DISK}).
+     * Area lights of a disabled shape are rendered as punctual lights, see
+     * {@link LightingParams#areaLightRectEnabled}. Defaults to true.
+     *
+     * @type {boolean}
+     */
+    set areaLightDiskEnabled(value) {
+        if (this._areaLightDiskEnabled !== value) {
+            this._areaLightDiskEnabled = value;
+
+            // lit shaders need to be rebuilt
+            this._dirtyLightsFnc();
+        }
+    }
+
+    /**
+     * Gets whether clustered lighting supports area lights of disk shape.
+     *
+     * @type {boolean}
+     */
+    get areaLightDiskEnabled() {
+        return this._areaLightDiskEnabled;
+    }
+
+    /**
+     * Sets whether clustered lighting supports area lights of sphere shape
+     * ({@link LIGHTSHAPE_SPHERE}). Area lights of a disabled shape are rendered as punctual lights,
+     * see {@link LightingParams#areaLightRectEnabled}. Defaults to true.
+     *
+     * @type {boolean}
+     */
+    set areaLightSphereEnabled(value) {
+        if (this._areaLightSphereEnabled !== value) {
+            this._areaLightSphereEnabled = value;
+
+            // lit shaders need to be rebuilt
+            this._dirtyLightsFnc();
+        }
+    }
+
+    /**
+     * Gets whether clustered lighting supports area lights of sphere shape.
+     *
+     * @type {boolean}
+     */
+    get areaLightSphereEnabled() {
+        return this._areaLightSphereEnabled;
+    }
+
+    /**
+     * Bit mask (1 << shape) of the area light shapes the clustered lighting supports, 0 when area
+     * lights are disabled.
+     *
+     * @type {number}
+     * @ignore
+     */
+    get areaLightShapes() {
+        if (!this._areaLightsEnabled) return 0;
+        return (this._areaLightRectEnabled ? 1 << LIGHTSHAPE_RECT : 0) |
+            (this._areaLightDiskEnabled ? 1 << LIGHTSHAPE_DISK : 0) |
+            (this._areaLightSphereEnabled ? 1 << LIGHTSHAPE_SPHERE : 0);
     }
 
     /**

@@ -5,12 +5,17 @@ import {
 } from '../../platform/graphics/constants.js';
 import { ShaderMaterial } from '../materials/shader-material.js';
 import { GSplatFormat } from '../gsplat/gsplat-format.js';
+import { GSplatVaryings } from './gsplat-varyings.js';
+import { LOD_DEBUG_COLORS } from './gsplat-lod-colors.js';
 import {
+    DITHER_BLUENOISE,
     GSPLATDATA_COMPACT,
     GSPLAT_RENDERER_AUTO, GSPLAT_RENDERER_RASTER_CPU_SORT,
     GSPLAT_RENDERER_COMPUTE, GSPLAT_RENDERER_RASTER_GPU_SORT,
     GSPLAT_DEBUG_NONE, GSPLAT_DEBUG_LOD, GSPLAT_DEBUG_SH_UPDATE, GSPLAT_DEBUG_HEATMAP,
-    GSPLAT_DEBUG_AABBS, GSPLAT_DEBUG_NODE_AABBS
+    GSPLAT_DEBUG_AABBS, GSPLAT_DEBUG_NODE_AABBS,
+    GSPLAT_LODMODE_DISTANCE,
+    GSPLAT_BUDGET_TARGET, GSPLAT_BUDGET_LIMIT
 } from '../constants.js';
 
 import glslCompactRead from '../shader-lib/glsl/chunks/gsplat/vert/formats/containerCompactRead.js';
@@ -21,6 +26,7 @@ import wgslCompactRead from '../shader-lib/wgsl/chunks/gsplat/vert/formats/conta
 import wgslCompactWrite from '../shader-lib/wgsl/chunks/gsplat/frag/formats/containerCompactWrite.js';
 import wgslPackedRead from '../shader-lib/wgsl/chunks/gsplat/vert/formats/containerPackedRead.js';
 import wgslPackedWrite from '../shader-lib/wgsl/chunks/gsplat/frag/formats/containerPackedWrite.js';
+import { SPLAT_BUDGET_DEFAULT } from './constants.js';
 
 /**
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
@@ -28,7 +34,7 @@ import wgslPackedWrite from '../shader-lib/wgsl/chunks/gsplat/frag/formats/conta
  */
 
 /**
- * Parameters for GSplat unified system.
+ * Parameters for the GSplat system.
  *
  * @category Graphics
  */
@@ -60,18 +66,29 @@ class GSplatParams {
     _dataFormat = GSPLATDATA_COMPACT;
 
     /**
+     * @type {boolean|undefined}
+     * @private
+     */
+    _antiAlias = undefined;
+
+    /**
      * Creates a new GSplatParams instance.
      *
      * @param {GraphicsDevice} device - The graphics device.
      */
     constructor(device) {
         this._device = device;
+        this._currentRenderer = this._resolveRenderer(this._renderer);
         this._format = this._createFormat(GSPLATDATA_COMPACT);
+        this._varyings = new GSplatVaryings(device);
 
         this._material.setParameter('alphaClip', 0.3);
         this._material.setParameter('alphaClipForward', 1.0 / 255.0);
         this._material.setParameter('minPixelSize', 2.0);
-        this._material.setParameter('minContribution', 3.0);
+        this._material.setParameter('minContribution', 2.0);
+        this._material.setParameter('foveationStrength', 0);
+        this._material.setParameter('foveationCenter', 0.3);
+        this._material.setParameter('antiAliasFilterSize', 0.1);
     }
 
     /**
@@ -101,8 +118,8 @@ class GSplatParams {
         } else {
             // Large work buffer format (32 bytes/splat):
             // - dataColor (RGBA16F/RGBA16U): RGBA color with alpha
-            // - dataTransformA (RGBA32U): center.xyz (3×32-bit floats as uint) + rotation.xy (2×16-bit halfs)
-            // - dataTransformB (RG32U): rotation.z + scale.xyz (4×16-bit halfs, scale.w derived via sqrt)
+            // - dataTransformA (RGBA32U): center.xyz (3×32-bit floats as uint) + rotation.xy (2×16-bit halves)
+            // - dataTransformB (RG32U): rotation.z + scale.xyz (4×16-bit halves, scale.w derived via sqrt)
             const colorFormat = this._device.getRenderableHdrFormat([PIXELFORMAT_RGBA16F]) || PIXELFORMAT_RGBA16U;
             format = new GSplatFormat(this._device, [
                 { name: 'dataColor', format: colorFormat },
@@ -116,6 +133,7 @@ class GSplatParams {
         }
 
         format.allowStreamRemoval = true;
+        format.dataFormat = dataFormat;
         return format;
     }
 
@@ -129,45 +147,101 @@ class GSplatParams {
     radialSorting = false;
 
     /**
+     * Enables stochastic alpha rendering on the WebGPU GPU-sort renderer. Splats are drawn
+     * without sorting, using dithered coverage, opaque blending and depth writes. Ignored by
+     * the CPU-sort renderer. Picking continues to use sorted rendering. Defaults to false.
+     * Applications can customize the sampling through the material's opacityDitherPS chunk.
+     *
+     * @type {boolean}
+     */
+    stochastic = false;
+
+    /**
+     * The noise pattern the coverage of a {@link GSplatParams#stochastic} splat is dithered
+     * against, ignored when `stochastic` is false. Can be:
+     *
+     * - {@link DITHER_BAYER2}: Coverage is dithered using a Bayer 2 matrix.
+     * - {@link DITHER_BAYER4}: Coverage is dithered using a Bayer 4 matrix.
+     * - {@link DITHER_BAYER8}: Coverage is dithered using a Bayer 8 matrix.
+     * - {@link DITHER_BAYER16}: Coverage is dithered using a Bayer 16 matrix.
+     * - {@link DITHER_BLUENOISE}: Coverage is dithered using a blue noise.
+     * - {@link DITHER_IGNNOISE}: Coverage is dithered using an interleaved gradient noise.
+     *
+     * Defaults to {@link DITHER_BLUENOISE}, which looks best under temporal anti-aliasing.
+     * {@link DITHER_NONE} is not a coverage pattern, so it is not accepted here - turn
+     * `stochastic` off instead.
+     *
+     * @type {string}
+     */
+    dither = DITHER_BLUENOISE;
+
+    /**
      * @type {number}
      * @private
      */
     _renderer = GSPLAT_RENDERER_AUTO;
 
     /**
+     * Resolved renderer in effect; computed from {@link _renderer} and the device in the
+     * constructor and the {@link renderer} setter.
+     *
      * @type {number}
      * @private
      */
     _currentRenderer = GSPLAT_RENDERER_RASTER_CPU_SORT;
 
     /**
+     * Resolves a requested renderer mode to the concrete one used on this device.
+     *
+     * @param {number} value - The requested renderer mode.
+     * @returns {number} The resolved renderer mode.
+     * @private
+     */
+    _resolveRenderer(value) {
+        // AUTO picks GPU-side sorting on WebGPU, CPU-side sorting elsewhere.
+        if (value === GSPLAT_RENDERER_AUTO) {
+            return this._device.isWebGPU ?
+                GSPLAT_RENDERER_RASTER_GPU_SORT : GSPLAT_RENDERER_RASTER_CPU_SORT;
+        }
+        // GPU sort requires WebGPU; fall back to CPU sort on WebGL.
+        if (value === GSPLAT_RENDERER_RASTER_GPU_SORT && !this._device.isWebGPU) {
+            return GSPLAT_RENDERER_RASTER_CPU_SORT;
+        }
+        return value;
+    }
+
+    /**
      * Sets the rendering pipeline used for gaussian splatting. Can be:
      *
      * - {@link GSPLAT_RENDERER_AUTO}: Automatically selects the best pipeline for the platform.
+     * Selects {@link GSPLAT_RENDERER_RASTER_GPU_SORT} on WebGPU and
+     * {@link GSPLAT_RENDERER_RASTER_CPU_SORT} on WebGL.
      * - {@link GSPLAT_RENDERER_RASTER_CPU_SORT}: Rasterization with CPU-side sorting.
-     * - {@link GSPLAT_RENDERER_COMPUTE}: Full compute pipeline (WebGPU only, experimental).
-     * - {@link GSPLAT_RENDERER_RASTER_GPU_SORT}: Rasterization with GPU-side sorting (WebGPU only,
-     * experimental).
+     * - {@link GSPLAT_RENDERER_RASTER_GPU_SORT}: Rasterization with GPU-side sorting (WebGPU only).
      *
      * Defaults to {@link GSPLAT_RENDERER_AUTO}. Modes requiring WebGPU fall back to
      * {@link GSPLAT_RENDERER_RASTER_CPU_SORT} on WebGL devices. The resolved mode actually used
      * can be queried via {@link currentRenderer}.
      *
+     * GPU-side sorting also falls back to {@link GSPLAT_RENDERER_RASTER_CPU_SORT} when the splats a
+     * camera renders on a layer need larger storage buffers than the device can bind - past about
+     * 4 million splats at the 128 MiB `maxStorageBufferBindingSize` WebGPU guarantees, which some
+     * devices are limited to. The fallback applies to that camera and layer, and stays in place
+     * while the camera renders splats on the layer, also when their number drops again. It ends
+     * once the layer has no splats left or the camera stops rendering the layer, and splats added
+     * after that start on GPU-side sorting again.
+     *
      * @type {number}
      */
     set renderer(value) {
+        if (value === GSPLAT_RENDERER_COMPUTE) {
+            Debug.removed('GSplatParams#renderer: GSPLAT_RENDERER_COMPUTE has been removed. Falling back to GSPLAT_RENDERER_AUTO.');
+            value = GSPLAT_RENDERER_AUTO;
+        }
+
         if (this._renderer !== value) {
             this._renderer = value;
-
-            if (value === GSPLAT_RENDERER_AUTO) {
-                this._currentRenderer = GSPLAT_RENDERER_RASTER_CPU_SORT;
-            } else if ((value === GSPLAT_RENDERER_COMPUTE ||
-                        value === GSPLAT_RENDERER_RASTER_GPU_SORT) &&
-                !this._device.isWebGPU) {
-                this._currentRenderer = GSPLAT_RENDERER_RASTER_CPU_SORT;
-            } else {
-                this._currentRenderer = value;
-            }
+            this._currentRenderer = this._resolveRenderer(value);
         }
     }
 
@@ -184,7 +258,8 @@ class GSplatParams {
     /**
      * The current rendering pipeline in effect after platform-based fallback resolution. When
      * {@link renderer} is set to a mode requiring WebGPU on a WebGL device, this returns the
-     * fallback mode actually being used.
+     * fallback mode actually being used. It does not reflect the per camera fallback to CPU-side
+     * sorting when the splats exceed the device's storage buffer limits, see {@link renderer}.
      *
      * @type {number}
      */
@@ -212,23 +287,26 @@ class GSplatParams {
      * - {@link GSPLAT_DEBUG_LOD}: Colorize splats by their selected LOD level.
      * - {@link GSPLAT_DEBUG_SH_UPDATE}: Random color per SH update pass to visualize update
      * frequency.
-     * - {@link GSPLAT_DEBUG_HEATMAP}: Heatmap visualization of average splats processed per
-     * pixel in each tile. Only supported with {@link GSPLAT_RENDERER_COMPUTE}.
      * - {@link GSPLAT_DEBUG_AABBS}: Draw world-space AABBs for each GSplat, colorized by LOD.
-     * - {@link GSPLAT_DEBUG_NODE_AABBS}: Draw world-space AABBs for each octree node of
-     * streamed GSplats, colorized by the currently selected LOD.
+     * - {@link GSPLAT_DEBUG_NODE_AABBS}: Draw world-space AABBs for the octree nodes streamed
+     * GSplats currently render, colorized by their LOD, and in gray the nodes still loading for the
+     * current view.
      *
      * Only one debug mode can be active at a time. Defaults to {@link GSPLAT_DEBUG_NONE}.
      *
      * @type {number}
      */
     set debug(value) {
+        if (value === GSPLAT_DEBUG_HEATMAP) {
+            Debug.removed('GSplatParams#debug: GSPLAT_DEBUG_HEATMAP has been removed and is ignored.');
+            return;
+        }
+
         if (this._debug !== value) {
             const prev = this._debug;
             this._debug = value;
 
-            if (value === GSPLAT_DEBUG_LOD || prev === GSPLAT_DEBUG_LOD ||
-                value === GSPLAT_DEBUG_HEATMAP || prev === GSPLAT_DEBUG_HEATMAP) {
+            if (value === GSPLAT_DEBUG_LOD || prev === GSPLAT_DEBUG_LOD) {
                 this.dirty = true;
             }
         }
@@ -241,6 +319,17 @@ class GSplatParams {
      */
     get debug() {
         return this._debug;
+    }
+
+    /**
+     * The colors {@link GSPLAT_DEBUG_LOD} tints splats with, as RGB arrays indexed by LOD level,
+     * for drawing a legend. Levels past the end share the last color.
+     *
+     * @type {number[][]}
+     * @ignore
+     */
+    get debugLodColors() {
+        return LOD_DEBUG_COLORS;
     }
 
     /**
@@ -342,19 +431,20 @@ class GSplatParams {
 
     /**
      * Angle threshold in degrees to trigger LOD updates based on camera rotation. Set to 0 to
-     * disable rotation-based updates. Defaults to 0.
+     * disable rotation-based updates. Rotation only affects LOD through {@link lodBehindPenalty},
+     * so rotation-based updates also stop when the penalty is 1. Defaults to 90.
      */
-    lodUpdateAngle = 0;
+    lodUpdateAngle = 90;
 
     /** @private */
-    _lodBehindPenalty = 1;
+    _lodBehindPenalty = 1.5;
 
     /**
      * Multiplier applied to effective distance for nodes behind the camera when determining LOD.
-     * Value 1 means no penalty; higher values drop LOD faster for nodes behind the camera.
-     *
-     * Note: when using a penalty > 1, it often makes sense to set a positive
-     * {@link lodUpdateAngle} so LOD is re-evaluated on camera rotation, not just translation.
+     * Value 1 means no penalty; higher values drop LOD faster for nodes behind the camera. Streamed
+     * LOD files also load in order of the same penalized distance, so higher values load the view
+     * in front of the camera earlier. Works together with {@link lodUpdateAngle}, which
+     * re-evaluates LOD as the camera rotates. Defaults to 1.5.
      *
      * @type {number}
      */
@@ -374,52 +464,42 @@ class GSplatParams {
         return this._lodBehindPenalty;
     }
 
-    /** @private */
-    _lodRangeMin = 0;
-
     /**
-     * Minimum allowed LOD index (inclusive). Defaults to 0.
-     *
      * @type {number}
+     * @deprecated Set {@link GSplatComponent#lodRangeMin} on the gsplat component instead.
+     * @ignore
      */
     set lodRangeMin(value) {
-        if (this._lodRangeMin !== value) {
-            this._lodRangeMin = value;
-            this.dirty = true;
-        }
+        Debug.warnOnce('GSplatParams#lodRangeMin is deprecated. Use lodRangeMin on the GSplatComponent instead.');
     }
 
     /**
-     * Gets minimum allowed LOD index (inclusive).
-     *
      * @type {number}
+     * @deprecated Set {@link GSplatComponent#lodRangeMin} on the gsplat component instead.
+     * @ignore
      */
     get lodRangeMin() {
-        return this._lodRangeMin;
+        Debug.warnOnce('GSplatParams#lodRangeMin is deprecated. Use lodRangeMin on the GSplatComponent instead.');
+        return 0;
     }
 
-    /** @private */
-    _lodRangeMax = 10;
-
     /**
-     * Maximum allowed LOD index (inclusive). Defaults to 10.
-     *
      * @type {number}
+     * @deprecated Set {@link GSplatComponent#lodRangeMax} on the gsplat component instead.
+     * @ignore
      */
     set lodRangeMax(value) {
-        if (this._lodRangeMax !== value) {
-            this._lodRangeMax = value;
-            this.dirty = true;
-        }
+        Debug.warnOnce('GSplatParams#lodRangeMax is deprecated. Use lodRangeMax on the GSplatComponent instead.');
     }
 
     /**
-     * Gets maximum allowed LOD index (inclusive).
-     *
      * @type {number}
+     * @deprecated Set {@link GSplatComponent#lodRangeMax} on the gsplat component instead.
+     * @ignore
      */
     get lodRangeMax() {
-        return this._lodRangeMax;
+        Debug.warnOnce('GSplatParams#lodRangeMax is deprecated. Use lodRangeMax on the GSplatComponent instead.');
+        return 99;
     }
 
     /** @private */
@@ -450,12 +530,14 @@ class GSplatParams {
     }
 
     /** @private */
-    _splatBudget = 0;
+    _splatBudget = SPLAT_BUDGET_DEFAULT;
 
     /**
-     * Target number of splats across all GSplats in the scene. When set > 0,
-     * the system adjusts LOD levels globally to stay within this budget.
-     * Set to 0 to disable budget enforcement and use LOD distances only (default).
+     * Number of splats across all GSplats in the scene. How it is used depends on
+     * {@link GSplatParams#splatBudgetMode}: as a target that LOD detail is raised to fill, or as a
+     * limit that only lowers the detail the LOD distances of each GSplat ask for. Set to 0 for no
+     * budget at all - in target mode everything then renders at its finest level, in limit mode
+     * the LOD distances alone decide. Defaults to 1000000.
      *
      * @type {number}
      */
@@ -467,12 +549,68 @@ class GSplatParams {
     }
 
     /**
-     * Gets the target number of splats across all GSplats in the scene.
+     * Gets the number of splats across all GSplats in the scene.
      *
      * @type {number}
      */
     get splatBudget() {
         return this._splatBudget;
+    }
+
+    /** @private */
+    _splatBudgetMode = GSPLAT_BUDGET_TARGET;
+
+    /**
+     * Sets how {@link GSplatParams#splatBudget} is used for streamed GSplats. Can be:
+     *
+     * - {@link GSPLAT_BUDGET_TARGET}: detail is raised until the budget is used up, wherever the
+     * camera is. The LOD distances of each GSplat only shape how detail falls off with distance
+     * and how it divides between GSplats.
+     * - {@link GSPLAT_BUDGET_LIMIT}: the LOD distances of each GSplat decide the detail, and the
+     * budget only lowers it when they would exceed it. A distant GSplat uses only the few splats
+     * its distance calls for.
+     *
+     * Defaults to {@link GSPLAT_BUDGET_TARGET}.
+     *
+     * @type {string}
+     */
+    set splatBudgetMode(value) {
+        if (value !== GSPLAT_BUDGET_TARGET && value !== GSPLAT_BUDGET_LIMIT) {
+            Debug.warnOnce(`GSplatParams#splatBudgetMode: ignoring invalid value '${value}', expected GSPLAT_BUDGET_TARGET or GSPLAT_BUDGET_LIMIT.`);
+            return;
+        }
+        if (this._splatBudgetMode !== value) {
+            this._splatBudgetMode = value;
+            this.dirty = true;
+        }
+    }
+
+    /**
+     * Gets how the splat budget is used.
+     *
+     * @type {string}
+     */
+    get splatBudgetMode() {
+        return this._splatBudgetMode;
+    }
+
+    /**
+     * @type {string}
+     * @deprecated LOD levels are always chosen by distance.
+     * @ignore
+     */
+    set lodMode(value) {
+        Debug.removed('GSplatParams#lodMode is removed. LOD levels are always chosen by distance, see GSplatComponent#lodBaseDistance and GSplatParams#splatBudgetMode.');
+    }
+
+    /**
+     * @type {string}
+     * @deprecated LOD levels are always chosen by distance.
+     * @ignore
+     */
+    get lodMode() {
+        Debug.removed('GSplatParams#lodMode is removed. LOD levels are always chosen by distance, see GSplatComponent#lodBaseDistance and GSplatParams#splatBudgetMode.');
+        return GSPLAT_LODMODE_DISTANCE;
     }
 
     /**
@@ -518,6 +656,14 @@ class GSplatParams {
      */
     useFog = true;
 
+    /**
+     * Whether to apply the camera's tonemapping and the scene exposure to Gaussian splats. When
+     * false, splats render with their stored colors, unaffected by {@link Scene#exposure} and the
+     * camera's {@link CameraComponent#toneMapping}. Fog, when enabled, still applies. Defaults to
+     * true.
+     */
+    useTonemap = true;
+
     /** @deprecated Use {@link debug} with {@link GSPLAT_DEBUG_SH_UPDATE} instead. */
     set colorizeColorUpdate(value) {
         Debug.deprecated('GSplatParams#colorizeColorUpdate is deprecated. Use GSplatParams#debug = GSPLAT_DEBUG_SH_UPDATE instead.');
@@ -537,6 +683,8 @@ class GSplatParams {
      * When the camera translates enough to change the viewing angle to an octree node or
      * splat by this amount, its SH colors are re-evaluated. Distant nodes naturally update
      * less frequently since they require more camera movement to reach the angle threshold.
+     * An orthographic camera views all splats along its forward direction, so their colors are
+     * re-evaluated together once the camera rotates by this amount, and moving it has no effect.
      * Set to 0 to update every frame where camera moves. Defaults to 10.
      */
     colorUpdateAngle = 10;
@@ -592,7 +740,7 @@ class GSplatParams {
      * @type {number}
      */
     get alphaClip() {
-        return this._material.getParameter('alphaClip')?.data ?? 0.3;
+        return this._material.getParameter('alphaClip')?.data ?? 0.1;
     }
 
     /**
@@ -637,10 +785,10 @@ class GSplatParams {
     }
 
     /**
-     * Sets the minimum visual contribution threshold for the {@link GSPLAT_RENDERER_COMPUTE} renderer.
-     * Splats whose total screen contribution (opacity * projected area) falls below this value are
+     * Sets the minimum visual contribution threshold for the {@link GSPLAT_RENDERER_RASTER_GPU_SORT}
+     * renderer. Splats whose total screen contribution (opacity * projected area) falls below this value are
      * discarded. Higher values cull more aggressively, improving performance at the cost of quality.
-     * Set to 0 to disable contribution culling. Defaults to 3.
+     * Set to 0 to disable contribution culling. Defaults to 2.
      *
      * @type {number}
      */
@@ -655,33 +803,107 @@ class GSplatParams {
      * @type {number}
      */
     get minContribution() {
-        return this._material.getParameter('minContribution')?.data ?? 3.0;
+        return this._material.getParameter('minContribution')?.data ?? 2.0;
     }
 
     /**
-     * Enables anti-aliasing compensation for Gaussian splats. Defaults to false.
+     * Sets the foveated contribution culling strength. Only used by the
+     * {@link GSPLAT_RENDERER_RASTER_GPU_SORT} renderer. When greater than zero, the contribution
+     * culling threshold is raised radially from the screen center: the effective threshold is
+     * `minContribution + foveationStrength * smoothstep(foveationCenter, 1, length(ndc))`, so the
+     * center of the screen is unaffected and low-contribution splats are culled increasingly
+     * toward the edges, reaching full strength at the screen edge and beyond (corners). Set to 0
+     * to disable. Defaults to 0.
      *
-     * This option is intended for splat data that was generated with anti-aliasing
-     * enabled during training/export. It improves visual stability and reduces
-     * flickering for very small or distant splats.
-     *
-     * If the source splats were generated without anti-aliasing, enabling this
-     * option may slightly soften the image or alter opacity.
-     *
-     * @type {boolean}
+     * @type {number}
      */
-    set antiAlias(value) {
-        this._material.setDefine('GSPLAT_AA', value);
+    set foveationStrength(value) {
+        this._material.setParameter('foveationStrength', value);
         this._material.update();
     }
 
     /**
-     * Gets whether anti-aliasing compensation is enabled.
+     * Gets the foveated contribution culling strength.
      *
-     * @type {boolean}
+     * @type {number}
+     */
+    get foveationStrength() {
+        return this._material.getParameter('foveationStrength')?.data ?? 0;
+    }
+
+    /**
+     * Sets the protected center radius for foveated contribution culling. Only used by the
+     * {@link GSPLAT_RENDERER_RASTER_GPU_SORT} renderer. Expressed in NDC radius units (0 at the
+     * screen center, 1 at the edge): within this radius {@link foveationStrength} has no effect,
+     * and the falloff ramps smoothly from this radius to the screen edge. Defaults to 0.3.
+     *
+     * @type {number}
+     */
+    set foveationCenter(value) {
+        this._material.setParameter('foveationCenter', value);
+        this._material.update();
+    }
+
+    /**
+     * Gets the protected center radius for foveated contribution culling.
+     *
+     * @type {number}
+     */
+    get foveationCenter() {
+        return this._material.getParameter('foveationCenter')?.data ?? 0.1;
+    }
+
+    /**
+     * Sets whether Gaussian splats are rendered with anti-aliasing compensation, the opacity
+     * correction that splats trained with anti-aliasing (a screen-space filter, as in Mip-Splatting)
+     * need to look right. When undefined, each splat follows the
+     * {@link GSplatResourceBase#antiAlias} or {@link GSplatOctreeResource#antiAlias} of its
+     * resource, which is set from the file when it records the training mode, so a scene can mix
+     * splats trained with and without anti-aliasing. Set to true or false to render every splat
+     * with or without it. Defaults to undefined.
+     *
+     * Rendering splats trained with anti-aliasing without the compensation makes small and distant
+     * splats too bright, and rendering other splats with it makes them too faint.
+     *
+     * @type {boolean|undefined}
+     */
+    set antiAlias(value) {
+        this._antiAlias = value;
+    }
+
+    /**
+     * Gets whether Gaussian splats are rendered with anti-aliasing compensation, or undefined when
+     * each splat follows its resource.
+     *
+     * @type {boolean|undefined}
      */
     get antiAlias() {
-        return !!this._material.getDefine('GSPLAT_AA');
+        return this._antiAlias;
+    }
+
+    /**
+     * Sets the size of the screen-space filter that splats trained with anti-aliasing were trained
+     * with: the variance of the filter, in pixels squared. It applies to the splats rendered with
+     * the anti-aliasing compensation (see {@link GSplatParams#antiAlias}); other splats use the 0.3
+     * filter of standard training. Set it to the value the splats were trained with: 0.1 for most
+     * trainers, including Mip-Splatting and the mip mode of Brush, 0.3 for the anti-aliased mode of
+     * gsplat. Defaults to 0.1.
+     *
+     * @type {number}
+     */
+    set antiAliasFilterSize(value) {
+        this._material.setParameter('antiAliasFilterSize', value);
+        this._material.update();
+    }
+
+    /**
+     * Gets the size of the screen-space filter that splats trained with anti-aliasing were trained
+     * with.
+     *
+     * @type {number}
+     */
+    get antiAliasFilterSize() {
+        return this._material.getParameter('antiAliasFilterSize')?.data ?? 0.1;
     }
 
     /**
@@ -766,8 +988,26 @@ class GSplatParams {
     cooldownTicks = 100;
 
     /**
+     * Whether the gaussian splats contribute to the scene depth, which the volumetric fog and the depth
+     * of field need in order to be bounded by the splats instead of drawing through them.
+     *
+     * This costs an extra full screen render target, and so defaults to false. Enable it for a scene
+     * where the splats need to take part in those effects. Requires the camera to render using
+     * {@link CameraFrame} - see {@link CameraFrame.isSplatSceneDepthSupported}.
+     *
+     * On some devices enabling this stores the scene depth at a lower precision, which the other
+     * effects using it share. The depth stays accurate over camera clip distances of roughly 0.000015
+     * to 16384 there; past the far end of that a distant depth loses accuracy, and the pixels nothing
+     * covers stop reading as far away as they are. Keep the far clip inside that range on those
+     * devices, or leave the effects which read the depth off.
+     *
+     * @type {boolean}
+     */
+    sceneDepthWrite = false;
+
+    /**
      * Work buffer data format. Controls the precision and bandwidth of the intermediate work buffer
-     * used during unified GSplat rendering. Can be set to {@link GSPLATDATA_COMPACT} (20 bytes/splat)
+     * used during GSplat rendering. Can be set to {@link GSPLATDATA_COMPACT} (20 bytes/splat)
      * or {@link GSPLATDATA_LARGE} (32 bytes/splat). Defaults to {@link GSPLATDATA_COMPACT}.
      *
      * @type {string}
@@ -806,9 +1046,9 @@ class GSplatParams {
 
     /**
      * A material template that can be customized by the user. Any defines, parameters, or shader
-     * chunks set on this material will be automatically applied to all GSplat components rendered
-     * in unified mode. After making changes, call {@link Material#update} to for the changes to be applied
-     * on the next frame.
+     * chunks set on this material will be automatically applied to all GSplat components. After
+     * making changes, call {@link Material#update} to for the changes to be applied on the next
+     * frame.
      *
      * @type {ShaderMaterial}
      * @example
@@ -822,7 +1062,7 @@ class GSplatParams {
 
     /**
      * Format descriptor for work buffer streams. Describes the textures used by the work buffer
-     * for intermediate storage during unified rendering. Users can add extra streams via
+     * for intermediate storage during rendering. Users can add extra streams via
      * {@link GSplatFormat#addExtraStreams} for custom per-splat data.
      *
      * @type {GSplatFormat}
@@ -830,7 +1070,7 @@ class GSplatParams {
      * // Add a custom stream to store per-splat component IDs
      * app.scene.gsplat.format.addExtraStreams([{
      *     name: 'splatId',
-     *     format: pc.PIXELFORMAT_R32U
+     *     format: PIXELFORMAT_R32U
      * }]);
      */
     get format() {
@@ -838,13 +1078,92 @@ class GSplatParams {
     }
 
     /**
-     * Called at the end of the frame to clear dirty flags.
+     * @type {GSplatVaryings}
+     * @private
+     */
+    _varyings;
+
+    /**
+     * The varyings version last applied to the material.
+     *
+     * @type {number}
+     * @private
+     */
+    _appliedVaryingsVersion = 0;
+
+    /**
+     * Custom varying streams for the gsplat render customization: per-splat values written by
+     * the `gsplatModifyVS` shader chunk and read per fragment by the `gsplatModifyPS` shader
+     * chunk. See {@link GSplatVaryings}.
+     *
+     * @type {GSplatVaryings}
+     * @example
+     * // Add a per-splat flag, written once per splat in gsplatModifyVS using setFlag(value),
+     * // and read per fragment in gsplatModifyPS using getFlag()
+     * app.scene.gsplat.varyings.add([{
+     *     name: 'flag',
+     *     type: TYPE_UINT32,
+     *     components: 1
+     * }]);
+     */
+    get varyings() {
+        return this._varyings;
+    }
+
+    /**
+     * Applies serialized scene settings (e.g. from the Editor) to the gsplat parameters. Reads
+     * flat `gsplat`-prefixed keys off the `render` settings object; missing keys leave the current
+     * value unchanged.
+     *
+     * @param {object} render - The render settings object.
+     * @ignore
+     */
+    applySettings(render) {
+        this.radialSorting = render.gsplatRadialSorting ?? this.radialSorting;
+
+        this.lodUpdateDistance = render.gsplatLodUpdateDistance ?? this.lodUpdateDistance;
+        this.lodUpdateAngle = render.gsplatLodUpdateAngle ?? this.lodUpdateAngle;
+        this.lodBehindPenalty = render.gsplatLodBehindPenalty ?? this.lodBehindPenalty;
+        this.lodUnderfillLimit = render.gsplatLodUnderfillLimit ?? this.lodUnderfillLimit;
+        this.splatBudget = render.gsplatSplatBudget ?? this.splatBudget;
+        this.splatBudgetMode = render.gsplatSplatBudgetMode ?? this.splatBudgetMode;
+
+        this.alphaClip = render.gsplatAlphaClip ?? this.alphaClip;
+        this.alphaClipForward = render.gsplatAlphaClipForward ?? this.alphaClipForward;
+        this.minPixelSize = render.gsplatMinPixelSize ?? this.minPixelSize;
+        this.minContribution = render.gsplatMinContribution ?? this.minContribution;
+        this.foveationStrength = render.gsplatFoveationStrength ?? this.foveationStrength;
+        this.foveationCenter = render.gsplatFoveationCenter ?? this.foveationCenter;
+
+        this.antiAlias = render.gsplatAntiAlias ?? this.antiAlias;
+        this.useFog = render.gsplatUseFog ?? this.useFog;
+        this.useTonemap = render.gsplatUseTonemap ?? this.useTonemap;
+        this.colorUpdateAngle = render.gsplatColorUpdateAngle ?? this.colorUpdateAngle;
+        this.cooldownTicks = render.gsplatCooldownTicks ?? this.cooldownTicks;
+        this.dataFormat = render.gsplatDataFormat ?? this.dataFormat;
+        this.enableIds = render.gsplatEnableIds ?? this.enableIds;
+    }
+
+    /**
+     * Called at the end of the frame to clear the parameter dirty flag.
      *
      * @ignore
      */
     frameEnd() {
-        this._material.dirty = false;
         this.dirty = false;
+    }
+
+    /**
+     * Called at the start of the frame, before the renderers synchronize the material, to apply
+     * pending changes.
+     *
+     * @ignore
+     */
+    frameUpdate() {
+        if (this._appliedVaryingsVersion !== this._varyings.version) {
+            this._appliedVaryingsVersion = this._varyings.version;
+            this._varyings.apply(this._material);
+        }
     }
 }
 

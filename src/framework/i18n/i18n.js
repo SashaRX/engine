@@ -12,6 +12,8 @@ import { I18nParser } from './i18n-parser.js';
  * Handles localization. Responsible for loading localization assets and returning translations for
  * a certain key. Can also handle plural forms. To override its default behavior define a different
  * implementation for {@link getText} and {@link getPluralText}.
+ *
+ * @category Framework
  */
 class I18n extends EventHandler {
     /**
@@ -148,7 +150,7 @@ class I18n extends EventHandler {
      * @example
      * // With a defined dictionary of locales
      * const availableLocales = { en: 'en-US', fr: 'fr-FR' };
-     * const locale = pc.I18n.getText('en-US', availableLocales);
+     * const locale = I18n.getText('en-US', availableLocales);
      * // returns 'en'
      * @ignore
      */
@@ -313,7 +315,7 @@ class I18n extends EventHandler {
         try {
             parsed = this._parser.parse(data);
         } catch (err) {
-            console.error(err);
+            console.error(`I18n.addData: failed to parse localization data: ${err?.message ?? err}`, err);
             return;
         }
 
@@ -349,7 +351,7 @@ class I18n extends EventHandler {
         try {
             parsed = this._parser.parse(data);
         } catch (err) {
-            console.error(err);
+            console.error(`I18n.removeData: failed to parse localization data: ${err?.message ?? err}`, err);
             return;
         }
 

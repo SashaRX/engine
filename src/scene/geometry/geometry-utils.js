@@ -4,11 +4,11 @@ import { Vec3 } from '../../core/math/vec3.js';
 /**
  * Generates normal information from the specified positions and triangle indices.
  *
- * @param {number[]} positions - An array of 3-dimensional vertex positions.
- * @param {number[]} indices - An array of triangle indices.
+ * @param {ArrayLike<number>} positions - An array of 3-dimensional vertex positions.
+ * @param {ArrayLike<number>} indices - An array of triangle indices.
  * @returns {number[]} An array of 3-dimensional vertex normals.
  * @example
- * const normals = pc.calculateNormals(positions, indices);
+ * const normals = calculateNormals(positions, indices);
  * @category Graphics
  */
 const calculateNormals = (positions, indices) => {
@@ -58,7 +58,11 @@ const calculateNormals = (positions, indices) => {
         const nx = normals[i * 3];
         const ny = normals[i * 3 + 1];
         const nz = normals[i * 3 + 2];
-        const invLen = 1 / Math.sqrt(nx * nx + ny * ny + nz * nz);
+        const lenSq = nx * nx + ny * ny + nz * nz;
+
+        // the sum is zero for a vertex used only by degenerate triangles, or by no triangle - keep
+        // a zero normal instead of dividing by zero, which would give NaN
+        const invLen = lenSq > 0 ? 1 / Math.sqrt(lenSq) : 0;
         normals[i * 3] *= invLen;
         normals[i * 3 + 1] *= invLen;
         normals[i * 3 + 2] *= invLen;
@@ -71,13 +75,13 @@ const calculateNormals = (positions, indices) => {
  * Generates tangent information from the specified positions, normals, texture coordinates and
  * triangle indices.
  *
- * @param {number[]} positions - An array of 3-dimensional vertex positions.
- * @param {number[]} normals - An array of 3-dimensional vertex normals.
- * @param {number[]} uvs - An array of 2-dimensional vertex texture coordinates.
- * @param {number[]} indices - An array of triangle indices.
+ * @param {ArrayLike<number>} positions - An array of 3-dimensional vertex positions.
+ * @param {ArrayLike<number>} normals - An array of 3-dimensional vertex normals.
+ * @param {ArrayLike<number>} uvs - An array of 2-dimensional vertex texture coordinates.
+ * @param {ArrayLike<number>} indices - An array of triangle indices.
  * @returns {number[]} An array of 3-dimensional vertex tangents.
  * @example
- * const tangents = pc.calculateTangents(positions, normals, uvs, indices);
+ * const tangents = calculateTangents(positions, normals, uvs, indices);
  * @category Graphics
  */
 const calculateTangents = (positions, normals, uvs, indices) => {

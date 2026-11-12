@@ -8,7 +8,8 @@ import { AnimComponentLayer } from './component-layer.js';
 import { AnimStateGraph } from '../../anim/state-graph/anim-state-graph.js';
 import { Entity } from '../../entity.js';
 import {
-    ANIM_PARAMETER_BOOLEAN, ANIM_PARAMETER_FLOAT, ANIM_PARAMETER_INTEGER, ANIM_PARAMETER_TRIGGER, ANIM_CONTROL_STATES
+    ANIM_PARAMETER_BOOLEAN, ANIM_PARAMETER_FLOAT, ANIM_PARAMETER_INTEGER, ANIM_PARAMETER_TRIGGER, ANIM_CONTROL_STATES,
+    OFFSCREENUPDATE_FULL, OFFSCREENUPDATE_NONE
 } from '../../anim/controller/constants.js';
 import { AnimTrack } from '../../anim/evaluator/anim-track.js';
 
@@ -22,7 +23,7 @@ import { AnimTrack } from '../../anim/evaluator/anim-track.js';
  * to an {@link Entity}, use {@link Entity#addComponent}:
  *
  * ```javascript
- * const entity = new pc.Entity();
+ * const entity = new Entity();
  * entity.addComponent('anim', {
  *     activate: true,
  *     speed: 1
@@ -66,6 +67,9 @@ class AnimComponent extends Component {
 
     /** @private */
     _playing = false;
+
+    /** @private */
+    _offscreenUpdate = OFFSCREENUPDATE_FULL;
 
     /** @private */
     _rootBone = null;
@@ -122,7 +126,7 @@ class AnimComponent extends Component {
         }
 
         if (_asset.resource) {
-            this._stateGraph = _asset.resource;
+            this._stateGraph = /** @type {any} */ (_asset.resource);
             this.loadStateGraph(this._stateGraph);
             _asset.on('change', this._onStateGraphAssetChangeEvent, this);
         } else {
@@ -226,6 +230,41 @@ class AnimComponent extends Component {
     }
 
     /**
+     * Sets how the anim component updates when it is not visible. The anim component is visible
+     * when a skinned or morphed mesh instance attached to its root (see {@link rootBone}) or a
+     * descendant of it was rendered in the previous frame, by any camera, including shadow
+     * casting. Can be:
+     *
+     * - {@link OFFSCREENUPDATE_FULL}: Always update fully. This is the default.
+     * - {@link OFFSCREENUPDATE_STATE}: Update the state graph, transitions and animation events,
+     * but do not evaluate and apply the pose.
+     * - {@link OFFSCREENUPDATE_NONE}: Do not update at all. The animation resumes where it stopped.
+     *
+     * Visibility is determined in the previous frame, so a character which becomes visible renders
+     * its previous pose for one frame. To avoid this, the application can predict the visibility
+     * (for example by testing the bounds of the character against the camera frustum) and set
+     * {@link OFFSCREENUPDATE_FULL} on characters likely to become visible.
+     *
+     * Only skinned and morphed mesh instances are taken into account, so an anim component which
+     * animates a hierarchy without them is never visible, and should use the default
+     * {@link OFFSCREENUPDATE_FULL}.
+     *
+     * @type {string}
+     */
+    set offscreenUpdate(value) {
+        this._offscreenUpdate = value ?? OFFSCREENUPDATE_FULL;
+    }
+
+    /**
+     * Gets how the anim component updates when it is not visible.
+     *
+     * @type {string}
+     */
+    get offscreenUpdate() {
+        return this._offscreenUpdate;
+    }
+
+    /**
      * Sets the entity that this anim component should use as the root of the animation hierarchy.
      *
      * @type {Entity}
@@ -261,9 +300,10 @@ class AnimComponent extends Component {
     }
 
     /**
-     * Returns the animation layers available in this anim component.
+     * Returns the animation layers available in this anim component. Use addLayer or loadStateGraph
+     * to change layers.
      *
-     * @type {AnimComponentLayer[]}
+     * @type {ReadonlyArray<AnimComponentLayer>}
      */
     get layers() {
         return this._layers;
@@ -374,14 +414,15 @@ class AnimComponent extends Component {
      *
      * @param {string} name - The name of the layer to create.
      * @param {number} [weight] - The blending weight of the layer. Defaults to 1.
-     * @param {object[]} [mask] - A list of paths to bones in the model which should be animated in
-     * this layer. If omitted the full model is used. Defaults to null.
+     * @param {object} [mask] - The mask of bones in the model which should be animated in this
+     * layer, keyed by bone path (see {@link AnimComponentLayer#mask}). If omitted the full model is
+     * used. Defaults to null.
      * @param {string} [blendType] - Defines how properties animated by this layer blend with
-     * animations of those properties in previous layers. Defaults to pc.ANIM_LAYER_OVERWRITE.
+     * animations of those properties in previous layers. Defaults to ANIM_LAYER_OVERWRITE.
      * @returns {AnimComponentLayer} The created anim component layer.
      */
     addLayer(name, weight, mask, blendType) {
-        const layer = this.findAnimationLayer(name);
+        const layer = this.findLayer(name);
         if (layer) return layer;
         const states = [
             {
@@ -484,7 +525,7 @@ class AnimComponent extends Component {
                 if (ANIM_CONTROL_STATES.indexOf(stateName) !== -1) continue;
                 const animationAsset = this._animationAssets[`${layer.name}:${stateName}`];
                 if (!animationAsset || !animationAsset.asset) {
-                    this.findAnimationLayer(layer.name).assignAnimation(stateName, AnimTrack.EMPTY);
+                    this.findLayer(layer.name).assignAnimation(stateName, AnimTrack.EMPTY);
                     continue;
                 }
                 const assetId = animationAsset.asset;
@@ -507,7 +548,7 @@ class AnimComponent extends Component {
     }
 
     onAnimationAssetLoaded(layerName, stateName, asset) {
-        this.findAnimationLayer(layerName).assignAnimation(stateName, asset.resource);
+        this.findLayer(layerName).assignAnimation(stateName, asset.resource);
     }
 
     /**
@@ -560,12 +601,28 @@ class AnimComponent extends Component {
     }
 
     /**
+     * Tests whether the given entity is part of the hierarchy this component animates. The binders
+     * resolve their targets within the root bone when one is assigned, and within this component's
+     * entity otherwise, so anything they bind - including the mesh instances backing morph target
+     * weights and animated material textures - belongs to an entity at or below that root.
+     *
+     * @param {Entity} entity - The entity to test.
+     * @returns {boolean} True if the entity is part of the animated hierarchy.
+     * @ignore
+     */
+    animatesEntity(entity) {
+        const graph = this._rootBone || this.entity;
+        return graph === entity || graph.isAncestorOf(entity);
+    }
+
+    /**
      * Finds an {@link AnimComponentLayer} in this component.
      *
      * @param {string} name - The name of the anim component layer to find.
-     * @returns {AnimComponentLayer} Layer.
+     * @returns {AnimComponentLayer|null} The layer, or null if this component has no layer with
+     * the given name.
      */
-    findAnimationLayer(name) {
+    findLayer(name) {
         const layerIndex = this._layerIndices[name];
         return this._layers[layerIndex] || null;
     }
@@ -599,7 +656,7 @@ class AnimComponent extends Component {
                 'parameters': {}
             }));
         }
-        const layer = this.findAnimationLayer(layerName);
+        const layer = this.findLayer(layerName);
         if (layer) {
             layer.assignAnimation(nodeName, animTrack, speed, loop);
         } else {
@@ -658,7 +715,7 @@ class AnimComponent extends Component {
             this.baseLayer.assignAnimation(nodePath, animTrack);
             return;
         }
-        const layer = layerName ? this.findAnimationLayer(layerName) : this.baseLayer;
+        const layer = layerName ? this.findLayer(layerName) : this.baseLayer;
         if (!layer) {
             Debug.error('assignAnimation: Trying to assign an anim track to a layer that doesn\'t exist');
             return;
@@ -674,7 +731,7 @@ class AnimComponent extends Component {
      * default layer is used.
      */
     removeNodeAnimations(nodeName, layerName) {
-        const layer = layerName ? this.findAnimationLayer(layerName) : this.baseLayer;
+        const layer = layerName ? this.findLayer(layerName) : this.baseLayer;
         if (!layer) {
             Debug.error('removeStateAnimations: Trying to remove animation tracks from a state before the state graph has been loaded. Have you called loadStateGraph?');
             return;
@@ -831,23 +888,57 @@ class AnimComponent extends Component {
         }
     }
 
+    /**
+     * @param {number} dt - The time elapsed since the last update, in seconds.
+     * @returns {boolean} False if the pose was not updated, as the anim component is not visible.
+     * @ignore
+     */
     update(dt) {
+        let evaluatePose = true;
+        if (this._offscreenUpdate !== OFFSCREENUPDATE_FULL) {
+            // visible if a deformed mesh instance in the animated hierarchy was rendered last frame
+            const root = this._rootBone || this.entity;
+            if (root._deformedRenderVersion !== this.system.app.graphicsDevice.renderVersion) {
+                if (this._offscreenUpdate === OFFSCREENUPDATE_NONE) {
+                    return false;
+                }
+                evaluatePose = false;
+            }
+        }
+
         for (let i = 0; i < this.layers.length; i++) {
-            this.layers[i].update(dt * this.speed);
+            this.layers[i].update(dt * this.speed, evaluatePose);
         }
         this._consumedTriggers.forEach((trigger) => {
             this.parameters[trigger].value = false;
         });
         this._consumedTriggers.clear();
+        return evaluatePose;
     }
 
     resolveDuplicatedEntityReferenceProperties(oldAnim, duplicatedIdsMap) {
-        if (oldAnim.rootBone && duplicatedIdsMap[oldAnim.rootBone.getGuid()]) {
-            this.rootBone = duplicatedIdsMap[oldAnim.rootBone.getGuid()];
+        if (oldAnim.rootBone && duplicatedIdsMap[oldAnim.rootBone.guid]) {
+            this.rootBone = duplicatedIdsMap[oldAnim.rootBone.guid];
         } else {
             this.rebind();
         }
     }
+
+    // ---- deprecated block start ----
+
+    /**
+     * @param {string} name - The name of the anim component layer to find.
+     * @returns {AnimComponentLayer} The layer, or null if not found. Typed as non-null, as it was
+     * before the rename, so existing callers keep compiling under strictNullChecks.
+     * @deprecated Use {@link AnimComponent#findLayer} instead.
+     * @ignore
+     */
+    findAnimationLayer(name) {
+        Debug.deprecated('AnimComponent#findAnimationLayer is deprecated. Use AnimComponent#findLayer instead.');
+        return /** @type {AnimComponentLayer} */ (this.findLayer(name));
+    }
+
+    // ---- deprecated block end ----
 }
 
 export { AnimComponent };

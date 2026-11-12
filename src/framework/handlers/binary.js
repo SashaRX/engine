@@ -1,30 +1,26 @@
-import { http, Http } from '../../platform/net/http.js';
+import { BinaryParser } from '../parsers/binary.js';
 import { ResourceHandler } from './handler.js';
 
+/**
+ * @import { AppBase } from '../app-base.js'
+ */
+
+/**
+ * Resource handler for the `binary` asset type. Loads a file as an `ArrayBuffer` without
+ * interpreting its contents.
+ *
+ * @category Asset
+ */
 class BinaryHandler extends ResourceHandler {
+    /**
+     * Create a new BinaryHandler instance.
+     *
+     * @param {AppBase} app - The running {@link AppBase}.
+     * @ignore
+     */
     constructor(app) {
         super(app, 'binary');
-    }
-
-    load(url, callback) {
-        if (typeof url === 'string') {
-            url = {
-                load: url,
-                original: url
-            };
-        }
-
-        http.get(url.load, {
-            responseType: Http.ResponseType.ARRAY_BUFFER,
-            retry: this.maxRetries > 0,
-            maxRetries: this.maxRetries
-        }, (err, response) => {
-            if (!err) {
-                callback(null, response);
-            } else {
-                callback(`Error loading binary resource: ${url.original} [${err}]`);
-            }
-        });
+        this.addParser(new BinaryParser());
     }
 
     /**
@@ -32,6 +28,7 @@ class BinaryHandler extends ResourceHandler {
      *
      * @param {DataView} data - The raw data as a DataView
      * @returns {ArrayBuffer} The parsed resource data.
+     * @ignore
      */
     openBinary(data) {
         return data.buffer;

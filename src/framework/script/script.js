@@ -43,6 +43,12 @@ import { SCRIPT_INITIALIZE, SCRIPT_POST_INITIALIZE } from './constants.js';
  *
  * For more information on how to create scripts, see the [Scripting Overview](https://developer.playcanvas.com/user-manual/scripting/).
  *
+ * The `playcanvas` package also ships a library of ready-to-use `Script` subclasses under the
+ * `playcanvas/scripts/esm/` subpath — camera and character controllers, post-processing, water,
+ * sky, grid, shadow catcher, planar reflections, XR and Gaussian-splat effects. Import them
+ * directly, for example
+ * `import { CameraControls } from 'playcanvas/scripts/esm/camera-controls.mjs'`.
+ *
  * @category Script
  */
 export class Script extends EventHandler {
@@ -208,8 +214,8 @@ export class Script extends EventHandler {
      * Create a new Script instance.
      *
      * @param {object} args - The input arguments object.
-     * @param {AppBase} args.app - The {@link AppBase} that is running the script.
-     * @param {Entity} args.entity - The {@link Entity} that the script is attached to.
+     * @param {AppBase} args.app - The AppBase that is running the script.
+     * @param {Entity} args.entity - The Entity that the script is attached to.
      */
     constructor(args) {
         super();
@@ -271,8 +277,8 @@ export class Script extends EventHandler {
     /**
      * @typedef {object} ScriptInitializationArgs
      * @property {boolean} [enabled] - True if the script instance is in running state.
-     * @property {AppBase} app - The {@link AppBase} that is running the script.
-     * @property {Entity} entity - The {@link Entity} that the script is attached to.
+     * @property {AppBase} app - The AppBase that is running the script.
+     * @property {Entity} entity - The Entity that the script is attached to.
      */
 
     /**
@@ -309,9 +315,19 @@ export class Script extends EventHandler {
     static __getScriptName = getScriptName;
 
     /**
-     * Sets the unique name of the script.
+     * Sets the unique name of the script. A base class which other scripts extend, but which is
+     * not a script itself, sets it to `null`, so that it is not registered as a script when a
+     * script file exports it.
      *
      * @type {string|null}
+     * @example
+     * export class EffectScriptBase extends Script {
+     *     static scriptName = null;
+     * }
+     *
+     * export class TintEffectScript extends EffectScriptBase {
+     *     static scriptName = 'tintEffect';
+     * }
      */
     static set scriptName(value) {
         this.__name = value;
@@ -365,14 +381,77 @@ export class Script extends EventHandler {
 const funcNameRegex = /^\s*function(?:\s|\s*\/\*.*\*\/\s*)+([^(\s\/]*)\s*/;
 
 /**
+ * Converts the first character of a string to lower case. Returns the input unchanged if it is
+ * empty or not a non-empty string (avoids throwing on e.g. an anonymous class's empty name).
+ *
+ * @param {string} str - The string to convert.
+ * @returns {string} The converted string.
+ */
+export const toLowerCamelCase = str => (str ? str[0].toLowerCase() + str.substring(1) : str);
+
+/**
+ * Returns the intrinsic (display) name of a script class - either a `scriptName` declared on the
+ * class itself, or its class name. Only an own `scriptName` is used, never one inherited from a
+ * base class: a subclass that does not declare its own `scriptName` would otherwise report its
+ * parent's name. This is primarily used for diagnostics; for the name a script is registered under
+ * use {@link getScriptRegistryName}.
+ *
  * @param {Function} constructorFn - The constructor function of the script type.
  * @returns {string|undefined} The script name.
  */
 export function getScriptName(constructorFn) {
     if (typeof constructorFn !== 'function') return undefined;
-    if (constructorFn.scriptName) return constructorFn.scriptName;
+    if (Object.prototype.hasOwnProperty.call(constructorFn, 'scriptName') && constructorFn.scriptName) {
+        return constructorFn.scriptName;
+    }
     if ('name' in Function.prototype) return constructorFn.name;
     if (constructorFn === Function || constructorFn === Function.prototype.constructor) return 'Function';
     const match = (`${constructorFn}`).match(funcNameRegex);
     return match ? match[1] : undefined;
+}
+
+/**
+ * Returns the name a script class declares itself: a `scriptName` defined on the class, or one
+ * assigned to it through the `scriptName` setter, which stores it as an own `__name` (this is also
+ * what a static `scriptName` field compiles to without define semantics for class fields). A name
+ * inherited from a base class is ignored.
+ *
+ * @param {Function} constructorFn - The constructor function of the script type.
+ * @returns {string|null|undefined} The declared name, null for a base class which declares that it
+ * is not a script itself, or undefined when the class declares no name.
+ */
+export function getDeclaredScriptName(constructorFn) {
+    if (Object.prototype.hasOwnProperty.call(constructorFn, 'scriptName')) {
+        return constructorFn.scriptName;
+    }
+    if (Object.prototype.hasOwnProperty.call(constructorFn, '__name')) {
+        return constructorFn.__name;
+    }
+    return undefined;
+}
+
+/**
+ * Returns the name a script class should be registered (and looked up) under. Considers only
+ * properties declared on the class itself - never inherited from a base class - so that a subclass
+ * does not adopt (and then overwrite in the registry) the name already registered for its base
+ * class. Resolution order:
+ *
+ * 1. an own `__name` already assigned to the class (e.g. an explicit registration name);
+ * 2. an own `scriptName` declared on the class, used verbatim;
+ * 3. the class name converted to lowerCamelCase (the convention used when no name is declared,
+ *    matching the ESM asset loader and {@link ScriptComponent#create}).
+ *
+ * @param {Function} constructorFn - The constructor function of the script type.
+ * @returns {string|undefined} The resolved name, or undefined if it cannot be determined.
+ */
+export function getScriptRegistryName(constructorFn) {
+    if (typeof constructorFn !== 'function') return undefined;
+    if (Object.prototype.hasOwnProperty.call(constructorFn, '__name') && constructorFn.__name) {
+        return constructorFn.__name;
+    }
+    if (Object.prototype.hasOwnProperty.call(constructorFn, 'scriptName') && constructorFn.scriptName) {
+        return constructorFn.scriptName;
+    }
+    const name = getScriptName(constructorFn);
+    return name ? toLowerCamelCase(name) : undefined;
 }

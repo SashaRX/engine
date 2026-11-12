@@ -7,8 +7,8 @@ export default /* glsl */`
     #include "envProcPS"
 #endif
 
-// ----- specular or reflections -----
-#ifdef LIT_SPECULAR_OR_REFLECTION
+// ----- specular or reflections (also needed by refraction, which uses specularity) -----
+#if defined(LIT_SPECULAR_OR_REFLECTION) || defined(LIT_REFRACTION)
     #ifdef LIT_METALNESS
         #include "metalnessModulatePS"
     #endif
@@ -41,6 +41,8 @@ export default /* glsl */`
     #include "reflectionCubePS"
 #elif LIT_REFLECTION_SOURCE == SPHEREMAP
     #include "reflectionSpherePS"
+#elif LIT_REFLECTION_SOURCE == PLANAR
+    #include "reflectionPlanarPS"
 #endif
 
 #ifdef LIT_REFLECTIONS
@@ -56,7 +58,8 @@ export default /* glsl */`
 #ifdef LIT_REFRACTION
     #if defined(LIT_DYNAMIC_REFRACTION)
         #include "refractionDynamicPS"
-    #elif defined(LIT_REFLECTIONS)
+    #elif LIT_REFLECTION_SOURCE != NONE
+        // cube refraction only needs a reflection source, not the specular reflection path
         #include "refractionCubePS"
     #endif
 #endif
@@ -64,8 +67,6 @@ export default /* glsl */`
 #ifdef LIT_SHEEN
     #include "lightSheenPS"
 #endif
-
-uniform vec3 material_ambient;
 
 #ifdef LIT_SPECULAR
     #ifdef LIT_LIGHTING

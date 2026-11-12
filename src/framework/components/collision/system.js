@@ -2,661 +2,611 @@ import { Debug } from '../../../core/debug.js';
 import { Mat4 } from '../../../core/math/mat4.js';
 import { Quat } from '../../../core/math/quat.js';
 import { Vec3 } from '../../../core/math/vec3.js';
+import { BufferUtils } from '../../../platform/graphics/buffer-utils.js';
 import { SEMANTIC_POSITION } from '../../../platform/graphics/constants.js';
-import { GraphNode } from '../../../scene/graph-node.js';
-import { Model } from '../../../scene/model.js';
+import { BODYTYPE_DYNAMIC } from '../rigid-body/constants.js';
 import { ComponentSystem } from '../system.js';
 import { CollisionComponent } from './component.js';
-import { CollisionComponentData } from './data.js';
 import { Trigger } from './trigger.js';
 
 /**
  * @import { AppBase } from '../../app-base.js'
+ * @import { Entity } from '../../entity.js'
+ * @import { GraphNode } from '../../../scene/graph-node.js'
+ */
+
+/**
+ * Options of the `collision` component accepted by {@link CollisionComponentSystem} that differ
+ * from the properties of {@link CollisionComponent}. Each replaces the same-named property of the
+ * options that {@link Entity#addComponent} derives from the component class; see
+ * {@link ComponentOptionsOverrides}.
+ *
+ * @typedef {object} CollisionComponentOptionsOverrides
+ * @property {Quat | number[]} [angularOffset] - Same as {@link CollisionComponent#angularOffset},
+ * also accepting `[x, y, z]` Euler angles in degrees or an `[x, y, z, w]` quaternion array.
+ * @property {Vec3 | number[]} [halfExtents] - Same as {@link CollisionComponent#halfExtents}, also
+ * accepting an `[x, y, z]` array.
+ * @property {Vec3 | number[]} [linearOffset] - Same as {@link CollisionComponent#linearOffset},
+ * also accepting an `[x, y, z]` array.
+ * @ignore
  */
 
 const mat4 = new Mat4();
+const sourceMat4 = new Mat4();
 const p1 = new Vec3();
 const p2 = new Vec3();
+const p3 = new Vec3();
 const quat = new Quat();
-const tempGraphNode = new GraphNode();
+const quat2 = new Quat();
+const worldScale = new Vec3();
+const rootScale = new Vec3();
+const linearVelocity = new Vec3();
+const angularVelocity = new Vec3();
 
-const _schema = [
-    'enabled',
-    'type',
+// The scale of a rotated entity is extracted from its world matrix with some float noise, so a
+// mesh shape is only rebuilt when the entity world scale moves by more than this relative amount
+const SCALE_CHANGE_TOLERANCE = 1e-5;
+
+/**
+ * Reads the scale of a matrix, keeping any mirroring. Mat4#getScale returns axis lengths, so a
+ * matrix mirrored by an odd number of negative scale factors comes back unmirrored. The rotation
+ * a shape is placed with comes from Quat#setFromMat4, which turns a mirrored basis into a
+ * rotation by negating its X axis, so the mirroring is carried here as a negative X scale
+ * whichever axis was mirrored - a shape scaled by it in that rotation's frame covers the volume
+ * the mesh renders in.
+ *
+ * @param {Mat4} matrix - The matrix to read.
+ * @param {Vec3} scale - The vector to write the scale to.
+ * @returns {Vec3} The scale vector.
+ */
+function getSignedScale(matrix, scale) {
+    matrix.getScale(scale);
+    if (matrix.scaleSign < 0) {
+        scale.x = -scale.x;
+    }
+    return scale;
+}
+
+/**
+ * Returns which components of a local scale are negative, as bits: 1 for X, 2 for Y, 4 for Z.
+ *
+ * @param {Vec3} scale - The local scale.
+ * @returns {number} The sign bits.
+ */
+function scaleSignBits(scale) {
+    return (scale.x < 0 ? 1 : 0) | (scale.y < 0 ? 2 : 0) | (scale.z < 0 ? 4 : 0);
+}
+
+/**
+ * Captures the signs of the local scales of a node and each of its ancestors. Flipping which
+ * axes are negative can turn the world rotation of a node by 180 degrees while leaving its
+ * signed scale alone - (-1, 1, 1) and (1, -1, 1) both read as (-1, 1, 1) - so a shape watches
+ * these too; a body that ignores rotation changes (a static one) would otherwise keep the old
+ * orientation.
+ *
+ * @param {GraphNode} node - The node.
+ * @returns {number[]} The sign bits of each node, starting with the node itself.
+ */
+function getScaleSigns(node) {
+    const signs = [];
+    for (let n = node; n; n = n.parent) {
+        signs.push(scaleSignBits(n.getLocalScale()));
+    }
+    return signs;
+}
+
+/**
+ * Returns whether the signs of the local scales of a node and its ancestors differ from a
+ * capture made by getScaleSigns. Nodes missing from either chain count as unmirrored, so moving
+ * a node under a parent of another depth is only a change when something on the way is
+ * mirrored. Allocation-free, as it runs every step.
+ *
+ * @param {GraphNode} node - The node.
+ * @param {number[]} signs - The capture.
+ * @returns {boolean} True if any sign changed.
+ */
+function scaleSignsChanged(node, signs) {
+    let i = 0;
+    for (let n = node; n; n = n.parent, i++) {
+        if ((i < signs.length ? signs[i] : 0) !== scaleSignBits(n.getLocalScale())) {
+            return true;
+        }
+    }
+    for (; i < signs.length; i++) {
+        if (signs[i] !== 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Note that `shape` is deliberately absent from this list - it is runtime
+// state created and owned by the type implementation, not component data
+const _properties = [
     'halfExtents',
-    'linearOffset',
-    'angularOffset',
     'radius',
     'axis',
     'height',
     'convexHull',
-    'asset',
-    'renderAsset',
-    'shape',
     'model',
+    'asset',
     'render',
+    'renderAsset',
+    'linearOffset',
+    'angularOffset',
     'checkVertexDuplicates'
 ];
 
-// Collision system implementations
-class CollisionSystemImpl {
-    constructor(system) {
-        this.system = system;
+// Per-type collision implementations. Rows only carry the operations a type performs
+// differently - call sites fall back to the shared flow functions below. createPhysicalShape
+// returns an opaque backend shape handle, or undefined when no physics backend is installed.
+const collisionImpls = {
+    box: {
+        createPhysicalShape: (system, entity, component) => system.physicsWorld?.createShape({
+            type: 'box',
+            halfExtents: component.halfExtents
+        })
+    },
+
+    sphere: {
+        createPhysicalShape: (system, entity, component) => system.physicsWorld?.createShape({
+            type: 'sphere',
+            radius: component.radius
+        })
+    },
+
+    capsule: {
+        createPhysicalShape: (system, entity, component) => system.physicsWorld?.createShape({
+            type: 'capsule',
+            axis: component.axis,
+            radius: component.radius,
+            height: component.height
+        })
+    },
+
+    cylinder: {
+        createPhysicalShape: (system, entity, component) => system.physicsWorld?.createShape({
+            type: 'cylinder',
+            axis: component.axis,
+            radius: component.radius,
+            height: component.height
+        })
+    },
+
+    cone: {
+        createPhysicalShape: (system, entity, component) => system.physicsWorld?.createShape({
+            type: 'cone',
+            axis: component.axis,
+            radius: component.radius,
+            height: component.height
+        })
+    },
+
+    mesh: {
+        createPhysicalShape: createMeshShape,
+        recreatePhysicalShapes: recreateMeshShapes
+    },
+
+    compound: {
+        createPhysicalShape: (system, entity, component) => system.physicsWorld?.createShape({
+            type: 'compound'
+        })
+    }
+};
+
+// Returns the per-type implementation for a collision type
+function getImpl(type) {
+    const impl = collisionImpls[type];
+    Debug.assert(impl, `getImpl: Invalid collision system type: ${type}`);
+    return impl;
+}
+
+// Shared per-type flow. Functions take the system explicitly - the per-type variance lives in
+// the collisionImpls table above, which only carries the operations a type does differently.
+
+// Called before the call to system.super.initializeComponentData is made
+function beforeInitialize(system, component) {
+    component._shape = null;
+}
+
+// Called after the call to system.super.initializeComponentData is made
+function afterInitialize(system, component) {
+    system.recreatePhysicalShapes(component);
+    component._initialized = true;
+}
+
+// Re-creates the entity's rigid body after the collision shape changed. A dynamic body keeps its
+// velocities across the swap, so a shape rebuilt mid-flight (a rescaled convex hull, say) does
+// not stop the body
+function recreateBody(entity) {
+    const rigidbody = entity.rigidbody;
+
+    const dynamic = rigidbody.type === BODYTYPE_DYNAMIC && !!rigidbody._body;
+    if (dynamic) {
+        linearVelocity.copy(rigidbody.linearVelocity);
+        angularVelocity.copy(rigidbody.angularVelocity);
     }
 
-    // Called before the call to system.super.initializeComponentData is made
-    beforeInitialize(component, data) {
-        data.shape = null;
+    rigidbody.disableSimulation();
+    rigidbody.createBody();
 
-        data.model = new Model();
-        data.model.graph = new GraphNode();
+    if (entity.enabled && rigidbody.enabled) {
+        rigidbody.enableSimulation();
+
+        if (dynamic) {
+            rigidbody.linearVelocity = linearVelocity;
+            rigidbody.angularVelocity = angularVelocity;
+        }
     }
+}
 
-    // Called after the call to system.super.initializeComponentData is made
-    afterInitialize(component, data) {
-        this.recreatePhysicalShapes(component);
-        component.data.initialized = true;
+// Creates the entity's trigger, or re-initializes an existing one
+function recreateTrigger(system, entity, component) {
+    if (!entity.trigger) {
+        entity.trigger = new Trigger(system.app, component);
+    } else {
+        entity.trigger.initialize();
     }
+}
 
-    // Called when a collision component changes type in order to recreate debug and physical shapes
-    reset(component, data) {
-        this.beforeInitialize(component, data);
-        this.afterInitialize(component, data);
+function destroyShape(system, component) {
+    if (component._shape) {
+        system.physicsWorld.destroyShape(component._shape);
+        component._shape = null;
     }
+    component._builtWorldScale = null;
+    component._builtScaleSigns = null;
+}
 
-    // Re-creates rigid bodies / triggers
-    recreatePhysicalShapes(component) {
-        const entity = component.entity;
-        const data = component.data;
+function beforeRemove(system, entity, component) {
+    system._unwatchMeshScale(component);
 
-        if (typeof Ammo !== 'undefined') {
-            if (entity.trigger) {
-                entity.trigger.destroy();
-                delete entity.trigger;
+    if (component._shape) {
+        if (component._compoundParent && !component._compoundParent.entity._destroying) {
+            system._removeCompoundChild(component._compoundParent, component._shape);
+
+            if (component._compoundParent.entity.rigidbody) {
+                component._compoundParent.entity.rigidbody.activate();
             }
+        }
 
-            if (data.shape) {
-                if (component._compoundParent) {
-                    if (component !== component._compoundParent) {
-                        this.system._removeCompoundChild(component._compoundParent, data.shape);
-                    }
+        component._compoundParent = null;
 
-                    if (component._compoundParent.entity.rigidbody) {
-                        component._compoundParent.entity.rigidbody.activate();
-                    }
-                }
+        destroyShape(system, component);
+    }
+}
 
-                this.destroyShape(data);
-            }
+/**
+ * Returns true if the local transforms of the nodes between a compound child and its root, and
+ * the nodes themselves, match those captured at the child's last write into the compound. Reads
+ * the stored local vectors directly, so it costs a few comparisons per level and nothing else.
+ *
+ * @param {{ nodes: { node: GraphNode, position: Vec3, rotation: Quat, scale: Vec3 }[] }} sync - The child's capture.
+ * @param {Entity} entity - The compound child's entity.
+ * @param {Entity} root - The compound root's entity.
+ * @returns {boolean} True if nothing on the path has changed.
+ */
+function compoundPathUnchanged(sync, entity, root) {
+    const nodes = sync.nodes;
+    let i = 0;
+    for (let node = entity; node && node !== root; node = node.parent, i++) {
+        const entry = nodes[i];
+        if (!entry || entry.node !== node ||
+            !entry.position.equals(node.getLocalPosition()) ||
+            !entry.rotation.equals(node.getLocalRotation()) ||
+            !entry.scale.equals(node.getLocalScale())) {
+            return false;
+        }
+    }
+    return i === nodes.length;
+}
 
-            data.shape = this.createPhysicalShape(component.entity, data);
+/**
+ * Captures the nodes between a compound child and its root with their current local transforms,
+ * reusing the entries of a previous capture so a child that moves every frame allocates nothing.
+ *
+ * @param {{ nodes: { node: GraphNode, position: Vec3, rotation: Quat, scale: Vec3 }[] }} sync - The child's capture.
+ * @param {Entity} entity - The compound child's entity.
+ * @param {Entity} root - The compound root's entity.
+ */
+function captureCompoundPath(sync, entity, root) {
+    const nodes = sync.nodes;
+    let i = 0;
+    for (let node = entity; node && node !== root; node = node.parent, i++) {
+        let entry = nodes[i];
+        if (!entry) {
+            entry = nodes[i] = { node: null, position: new Vec3(), rotation: new Quat(), scale: new Vec3() };
+        }
+        entry.node = node;
+        entry.position.copy(node.getLocalPosition());
+        entry.rotation.copy(node.getLocalRotation());
+        entry.scale.copy(node.getLocalScale());
+    }
+    nodes.length = i;
+}
 
-            const firstCompoundChild = !component._compoundParent;
+// Re-creates rigid bodies / triggers
+function recreateShapes(system, component) {
+    const entity = component.entity;
+    const world = system.physicsWorld;
 
-            if (data.type === 'compound' && (!component._compoundParent || component === component._compoundParent)) {
-                component._compoundParent = component;
+    if (world) {
+        if (entity.trigger) {
+            entity.trigger.destroy();
+            delete entity.trigger;
+        }
 
-                entity.forEach(this._addEachDescendant, component);
-            } else if (data.type !== 'compound') {
-                if (!component.rigidbody) {
-                    component._compoundParent = null;
-                    let parent = entity.parent;
-                    while (parent) {
-                        if (parent.collision && parent.collision.type === 'compound') {
-                            component._compoundParent = parent.collision;
-                            break;
-                        }
-                        parent = parent.parent;
-                    }
-                }
-            }
-
+        if (component._shape) {
             if (component._compoundParent) {
                 if (component !== component._compoundParent) {
-                    if (firstCompoundChild && component._compoundParent.shape.getNumChildShapes() === 0) {
-                        this.system.recreatePhysicalShapes(component._compoundParent);
-                    } else {
-                        this.system.updateCompoundChildTransform(entity, true);
-
-                        if (component._compoundParent.entity.rigidbody) {
-                            component._compoundParent.entity.rigidbody.activate();
-                        }
-                    }
+                    system._removeCompoundChild(component._compoundParent, component._shape);
                 }
-            }
-
-            if (entity.rigidbody) {
-                entity.rigidbody.disableSimulation();
-                entity.rigidbody.createBody();
-
-                if (entity.enabled && entity.rigidbody.enabled) {
-                    entity.rigidbody.enableSimulation();
-                }
-            } else if (!component._compoundParent) {
-                if (!entity.trigger) {
-                    entity.trigger = new Trigger(this.system.app, component, data);
-                } else {
-                    entity.trigger.initialize(data);
-                }
-            }
-        }
-    }
-
-    // Creates a physical shape for the collision. This consists
-    // of the actual shape that will be used for the rigid bodies / triggers of
-    // the collision.
-    createPhysicalShape(entity, data) {
-        return undefined;
-    }
-
-    updateTransform(component, position, rotation, scale) {
-        if (component.entity.trigger) {
-            component.entity.trigger.updateTransform();
-        }
-    }
-
-    destroyShape(data) {
-        if (data.shape) {
-            Ammo.destroy(data.shape);
-            data.shape = null;
-        }
-    }
-
-    beforeRemove(entity, component) {
-        if (component.data.shape) {
-            if (component._compoundParent && !component._compoundParent.entity._destroying) {
-                this.system._removeCompoundChild(component._compoundParent, component.data.shape);
 
                 if (component._compoundParent.entity.rigidbody) {
                     component._compoundParent.entity.rigidbody.activate();
                 }
             }
 
-            component._compoundParent = null;
-
-            this.destroyShape(component.data);
-        }
-    }
-
-    // Called when the collision is removed
-    remove(entity, data) {
-        if (entity.rigidbody && entity.rigidbody.body) {
-            entity.rigidbody.disableSimulation();
+            destroyShape(system, component);
         }
 
-        if (entity.trigger) {
-            entity.trigger.destroy();
-            delete entity.trigger;
-        }
-    }
+        component._shape = getImpl(component._type).createPhysicalShape(system, entity, component);
 
-    // Called when the collision is cloned to another entity
-    clone(entity, clone) {
-        const src = this.system.store[entity.getGuid()];
+        const firstCompoundChild = !component._compoundParent;
 
-        const data = {
-            enabled: src.data.enabled,
-            type: src.data.type,
-            halfExtents: [src.data.halfExtents.x, src.data.halfExtents.y, src.data.halfExtents.z],
-            linearOffset: [src.data.linearOffset.x, src.data.linearOffset.y, src.data.linearOffset.z],
-            angularOffset: [src.data.angularOffset.x, src.data.angularOffset.y, src.data.angularOffset.z, src.data.angularOffset.w],
-            radius: src.data.radius,
-            axis: src.data.axis,
-            height: src.data.height,
-            convexHull: src.data.convexHull,
-            asset: src.data.asset,
-            renderAsset: src.data.renderAsset,
-            model: src.data.model,
-            render: src.data.render,
-            checkVertexDuplicates: src.data.checkVertexDuplicates
-        };
+        if (component._type === 'compound' && (!component._compoundParent || component === component._compoundParent)) {
+            component._compoundParent = component;
 
-        return this.system.addComponent(clone, data);
-    }
-}
-
-// Box Collision System
-class CollisionBoxSystemImpl extends CollisionSystemImpl {
-    createPhysicalShape(entity, data) {
-        if (typeof Ammo !== 'undefined') {
-            const he = data.halfExtents;
-            const ammoHe = new Ammo.btVector3(he ? he.x : 0.5, he ? he.y : 0.5, he ? he.z : 0.5);
-            const shape = new Ammo.btBoxShape(ammoHe);
-            Ammo.destroy(ammoHe);
-            return shape;
-        }
-        return undefined;
-    }
-}
-
-// Sphere Collision System
-class CollisionSphereSystemImpl extends CollisionSystemImpl {
-    createPhysicalShape(entity, data) {
-        if (typeof Ammo !== 'undefined') {
-            return new Ammo.btSphereShape(data.radius);
-        }
-        return undefined;
-    }
-}
-
-// Capsule Collision System
-class CollisionCapsuleSystemImpl extends CollisionSystemImpl {
-    createPhysicalShape(entity, data) {
-        const axis = data.axis ?? 1;
-        const radius = data.radius ?? 0.5;
-        const height = Math.max((data.height ?? 2) - 2 * radius, 0);
-
-        let shape = null;
-
-        if (typeof Ammo !== 'undefined') {
-            switch (axis) {
-                case 0:
-                    shape = new Ammo.btCapsuleShapeX(radius, height);
-                    break;
-                case 1:
-                    shape = new Ammo.btCapsuleShape(radius, height);
-                    break;
-                case 2:
-                    shape = new Ammo.btCapsuleShapeZ(radius, height);
-                    break;
+            entity.forEach(system._addEachDescendant, component);
+        } else if (component._type !== 'compound') {
+            if (!entity.rigidbody) {
+                component._compoundParent = null;
+                let parent = entity.parent;
+                while (parent) {
+                    if (parent.collision && parent.collision.type === 'compound') {
+                        component._compoundParent = parent.collision;
+                        break;
+                    }
+                    parent = parent.parent;
+                }
             }
         }
 
-        return shape;
-    }
-}
+        if (component._compoundParent) {
+            if (component !== component._compoundParent) {
+                if (firstCompoundChild && world.getCompoundChildCount(component._compoundParent.shape) === 0) {
+                    system.recreatePhysicalShapes(component._compoundParent);
+                } else {
+                    system.updateCompoundChildTransform(entity, true);
 
-// Cylinder Collision System
-class CollisionCylinderSystemImpl extends CollisionSystemImpl {
-    createPhysicalShape(entity, data) {
-        const axis = data.axis ?? 1;
-        const radius = data.radius ?? 0.5;
-        const height = data.height ?? 1;
-
-        let halfExtents = null;
-        let shape = null;
-
-        if (typeof Ammo !== 'undefined') {
-            switch (axis) {
-                case 0:
-                    halfExtents = new Ammo.btVector3(height * 0.5, radius, radius);
-                    shape = new Ammo.btCylinderShapeX(halfExtents);
-                    break;
-                case 1:
-                    halfExtents = new Ammo.btVector3(radius, height * 0.5, radius);
-                    shape = new Ammo.btCylinderShape(halfExtents);
-                    break;
-                case 2:
-                    halfExtents = new Ammo.btVector3(radius, radius, height * 0.5);
-                    shape = new Ammo.btCylinderShapeZ(halfExtents);
-                    break;
+                    if (component._compoundParent.entity.rigidbody) {
+                        component._compoundParent.entity.rigidbody.activate();
+                    }
+                }
             }
         }
 
-        if (halfExtents) {
-            Ammo.destroy(halfExtents);
+        if (entity.rigidbody) {
+            recreateBody(entity);
+        } else if (!component._compoundParent) {
+            recreateTrigger(system, entity, component);
         }
-
-        return shape;
     }
 }
 
-// Cone Collision System
-class CollisionConeSystemImpl extends CollisionSystemImpl {
-    createPhysicalShape(entity, data) {
-        const axis = data.axis ?? 1;
-        const radius = data.radius ?? 0.5;
-        const height = data.height ?? 1;
+// Builds a PhysicsMeshSource for one mesh at the entity world scale. Vertex and index data are
+// exposed through lazy accessors so they are only extracted when the backend actually builds
+// triangle data - sources whose geometry is already cached (by mesh id) never touch the vertex
+// buffer. A model node places its mesh in model space: the node pose and scale are applied to
+// the source and the entity scale multiplies both, which is what scaling a compound of node
+// shapes resolves to.
+function createMeshSource(system, mesh, node, entityScale, convexHull, checkDuplicates) {
+    let positions = null;
+    let stride = 0;
+    let indices = null;
+    let extracted = false;
 
-        let shape = null;
+    const extract = () => {
+        if (extracted) return;
+        extracted = true;
 
-        if (typeof Ammo !== 'undefined') {
-            switch (axis) {
-                case 0:
-                    shape = new Ammo.btConeShapeX(radius, height);
-                    break;
-                case 1:
-                    shape = new Ammo.btConeShape(radius, height);
-                    break;
-                case 2:
-                    shape = new Ammo.btConeShapeZ(radius, height);
-                    break;
-            }
-        }
-
-        return shape;
-    }
-}
-
-// Mesh Collision System
-class CollisionMeshSystemImpl extends CollisionSystemImpl {
-    // override for the mesh implementation because the asset model needs
-    // special handling
-    beforeInitialize(component, data) {}
-
-    createAmmoHull(mesh, node, shape, scale) {
-        const hull = new Ammo.btConvexHullShape();
-
-        const point = new Ammo.btVector3();
-
-        const positions = [];
-        mesh.getPositions(positions);
-
-        for (let i = 0; i < positions.length; i += 3) {
-            point.setValue(positions[i] * scale.x, positions[i + 1] * scale.y, positions[i + 2] * scale.z);
-
-            // No need to calculate the aabb here. We'll do it after all points are added.
-            hull.addPoint(point, false);
-        }
-
-        Ammo.destroy(point);
-
-        hull.recalcLocalAabb();
-        hull.setMargin(0.01);   // Note: default margin is 0.04
-
-        const transform = this.system._getNodeTransform(node);
-        shape.addChildShape(transform, hull);
-        Ammo.destroy(transform);
-    }
-
-    createAmmoMesh(mesh, node, shape, scale, checkDupes = true) {
-        const system = this.system;
-        let triMesh;
-
-        if (system._triMeshCache[mesh.id]) {
-            triMesh = system._triMeshCache[mesh.id];
+        if (convexHull) {
+            // hulls consume every position, tightly packed
+            positions = [];
+            mesh.getPositions(positions);
+            stride = 3;
         } else {
             const vb = mesh.vertexBuffer;
-
             const format = vb.getFormat();
-            let stride, positions;
             for (let i = 0; i < format.elements.length; i++) {
                 const element = format.elements[i];
                 if (element.name === SEMANTIC_POSITION) {
-                    positions = new Float32Array(vb.lock(), element.offset);
+                    positions = BufferUtils.createStorageView(vb, Float32Array, element.offset);
                     stride = element.stride / 4;
                     break;
                 }
             }
 
-            const indices = [];
+            indices = [];
             mesh.getIndices(indices);
-            const numTriangles = mesh.primitive[0].count / 3;
-
-            const v1 = new Ammo.btVector3();
-            let i1, i2, i3;
-
-            const base = mesh.primitive[0].base;
-            triMesh = new Ammo.btTriangleMesh();
-            system._triMeshCache[mesh.id] = triMesh;
-
-            const vertexCache = new Map();
-            Debug.assert(typeof triMesh.getIndexedMeshArray === 'function', 'Ammo.js version is too old, please update to a newer Ammo.');
-            const indexedArray = triMesh.getIndexedMeshArray();
-            indexedArray.at(0).m_numTriangles = numTriangles;
-
-            const sx = scale ? scale.x : 1;
-            const sy = scale ? scale.y : 1;
-            const sz = scale ? scale.z : 1;
-
-            const addVertex = (index) => {
-                const x = positions[index * stride] * sx;
-                const y = positions[index * stride + 1] * sy;
-                const z = positions[index * stride + 2] * sz;
-
-                let idx;
-                if (checkDupes) {
-                    const str = `${x}:${y}:${z}`;
-
-                    idx = vertexCache.get(str);
-                    if (idx !== undefined) {
-                        return idx;
-                    }
-
-                    v1.setValue(x, y, z);
-                    idx = triMesh.findOrAddVertex(v1, false);
-                    vertexCache.set(str, idx);
-                } else {
-                    v1.setValue(x, y, z);
-                    idx = triMesh.findOrAddVertex(v1, false);
-                }
-
-                return idx;
-            };
-
-            for (let i = 0; i < numTriangles; i++) {
-                i1 = addVertex(indices[base + i * 3]);
-                i2 = addVertex(indices[base + i * 3 + 1]);
-                i3 = addVertex(indices[base + i * 3 + 2]);
-
-                triMesh.addIndex(i1);
-                triMesh.addIndex(i2);
-                triMesh.addIndex(i3);
-            }
-
-            Ammo.destroy(v1);
         }
+    };
 
-        const triMeshShape = new Ammo.btBvhTriangleMeshShape(triMesh, true /* useQuantizedAabbCompression */);
+    const source = {
+        id: mesh.id,
+        get positions() {
+            extract();
+            return positions;
+        },
+        get stride() {
+            extract();
+            return stride;
+        },
+        get indices() {
+            extract();
+            return indices;
+        },
+        base: mesh.primitive[0].base,
+        count: mesh.primitive[0].count,
+        convexHull: convexHull,
+        checkDuplicates: checkDuplicates,
+        scale: entityScale.clone(),
+        position: new Vec3(),
+        rotation: new Quat()
+    };
 
-        if (!scale) {
-            const scaling = system._getNodeScaling(node);
-            triMeshShape.setLocalScaling(scaling);
-            Ammo.destroy(scaling);
-        }
-
-        const transform = system._getNodeTransform(node);
-        shape.addChildShape(transform, triMeshShape);
-        Ammo.destroy(transform);
+    if (node) {
+        // the node pose in the frame of the entity's shape, which carries the entity scale
+        sourceMat4.setScale(entityScale.x, entityScale.y, entityScale.z);
+        sourceMat4.mul(node.getWorldTransform());
+        sourceMat4.getTranslation(source.position);
+        source.rotation.setFromMat4(sourceMat4);
+        getSignedScale(sourceMat4, source.scale);
     }
 
-    createPhysicalShape(entity, data) {
-        if (typeof Ammo === 'undefined') return undefined;
+    return source;
+}
 
-        if (data.model || data.render) {
+function createMeshShape(system, entity, component) {
+    const world = system.physicsWorld;
+    if (!world) return undefined;
 
-            const shape = new Ammo.btCompoundShape();
-            const entityTransform = entity.getWorldTransform();
-            const scale = entityTransform.getScale();
+    if (component._model || component._render) {
 
-            if (data.render) {
-                const meshes = data.render.meshes;
-                for (let i = 0; i < meshes.length; i++) {
-                    if (data.convexHull) {
-                        this.createAmmoHull(meshes[i], tempGraphNode, shape, scale);
-                    } else {
-                        this.createAmmoMesh(meshes[i], tempGraphNode, shape, scale, data.checkVertexDuplicates);
-                    }
-                }
-            } else if (data.model) {
-                const meshInstances = data.model.meshInstances;
-                for (let i = 0; i < meshInstances.length; i++) {
-                    this.createAmmoMesh(meshInstances[i].mesh, meshInstances[i].node, shape, null, data.checkVertexDuplicates);
-                }
-                const vec = new Ammo.btVector3(scale.x, scale.y, scale.z);
-                shape.setLocalScaling(vec);
-                Ammo.destroy(vec);
+        const scale = getSignedScale(entity.getWorldTransform(), new Vec3());
+        const sources = [];
+
+        if (component._render) {
+            const meshes = component._render.meshes;
+            for (let i = 0; i < meshes.length; i++) {
+                sources.push(createMeshSource(system, meshes[i], null, scale, component._convexHull, component._checkVertexDuplicates));
             }
-
-            return shape;
-        }
-
-        return undefined;
-    }
-
-    recreatePhysicalShapes(component) {
-        const data = component.data;
-
-        if (data.renderAsset || data.asset) {
-            if (component.enabled && component.entity.enabled) {
-                this.loadAsset(
-                    component,
-                    data.renderAsset || data.asset,
-                    data.renderAsset ? 'render' : 'model'
-                );
-                return;
+        } else if (component._model) {
+            const meshInstances = component._model.meshInstances;
+            for (let i = 0; i < meshInstances.length; i++) {
+                sources.push(createMeshSource(system, meshInstances[i].mesh, meshInstances[i].node, scale, false, component._checkVertexDuplicates));
             }
         }
 
-        this.doRecreatePhysicalShape(component);
+        // record the scale the shape is built with and watch the entity for changes to it, so a
+        // runtime rescale rebuilds the shape (see _updateMeshScales)
+        component._builtWorldScale = scale;
+        component._builtScaleSigns = getScaleSigns(entity);
+        if (world.supportsMeshScaling) {
+            system._watchMeshScale(component);
+        }
+
+        return world.createShape({
+            type: 'mesh',
+            sources: sources
+        });
     }
 
-    loadAsset(component, id, property) {
-        const data = component.data;
-        const assets = this.system.app.assets;
-        const previousPropertyValue = data[property];
+    return undefined;
+}
 
-        const onAssetFullyReady = (asset) => {
-            if (data[property] !== previousPropertyValue) {
-                // the asset has changed since we started loading it, so ignore this callback
-                return;
-            }
-            data[property] = asset.resource;
-            this.doRecreatePhysicalShape(component);
-        };
-
-        const loadAndHandleAsset = (asset) => {
-            asset.ready((asset) => {
-                if (asset.data.containerAsset) {
-                    const containerAsset = assets.get(asset.data.containerAsset);
-                    if (containerAsset.loaded) {
-                        onAssetFullyReady(asset);
-                    } else {
-                        containerAsset.ready(() => {
-                            onAssetFullyReady(asset);
-                        });
-                        assets.load(containerAsset);
-                    }
-                } else {
-                    onAssetFullyReady(asset);
-                }
-            });
-
-            assets.load(asset);
-        };
-
-        const asset = assets.get(id);
-        if (asset) {
-            loadAndHandleAsset(asset);
-        } else {
-            assets.once(`add:${id}`, loadAndHandleAsset);
-        }
-    }
-
-    doRecreatePhysicalShape(component) {
-        const entity = component.entity;
-        const data = component.data;
-
-        if (data.model || data.render) {
-            this.destroyShape(data);
-
-            data.shape = this.createPhysicalShape(entity, data);
-
-            if (entity.rigidbody) {
-                entity.rigidbody.disableSimulation();
-                entity.rigidbody.createBody();
-
-                if (entity.enabled && entity.rigidbody.enabled) {
-                    entity.rigidbody.enableSimulation();
-                }
-            } else {
-                if (!entity.trigger) {
-                    entity.trigger = new Trigger(this.system.app, component, data);
-                } else {
-                    entity.trigger.initialize(data);
-                }
-            }
-        } else {
-            this.beforeRemove(entity, component);
-            this.remove(entity, data);
-        }
-    }
-
-    updateTransform(component, position, rotation, scale) {
-        if (component.shape) {
-            const entityTransform = component.entity.getWorldTransform();
-            const worldScale = entityTransform.getScale();
-
-            // if the scale changed then recreate the shape
-            const previousScale = component.shape.getLocalScaling();
-            if (worldScale.x !== previousScale.x() ||
-                worldScale.y !== previousScale.y() ||
-                worldScale.z !== previousScale.z()) {
-                this.doRecreatePhysicalShape(component);
-            }
-        }
-
-        super.updateTransform(component, position, rotation, scale);
-    }
-
-    destroyShape(data) {
-        if (!data.shape) {
-            return;
-        }
-
-        const numShapes = data.shape.getNumChildShapes();
-        for (let i = 0; i < numShapes; i++) {
-            const shape = data.shape.getChildShape(i);
-            Ammo.destroy(shape);
-        }
-
-        Ammo.destroy(data.shape);
-        data.shape = null;
+// Rebuilds the mesh shape from the component's current model or render sources, skipping any
+// asset loading. The shared flow detaches a compound child from its parent compound and re-adds
+// the rebuilt shape, and only creates a trigger for a stand-alone component
+function doRecreateMeshShape(system, component) {
+    if (component._model || component._render) {
+        recreateShapes(system, component);
+    } else {
+        beforeRemove(system, component.entity, component);
+        system.onRemove(component.entity);
     }
 }
 
-// Compound Collision System
-class CollisionCompoundSystemImpl extends CollisionSystemImpl {
-    createPhysicalShape(entity, data) {
-        if (typeof Ammo !== 'undefined') {
-            return new Ammo.btCompoundShape();
-        }
-        return undefined;
-    }
+function loadMeshAsset(system, component, id, property) {
+    const assets = system.app.assets;
+    // write the loaded resource to the private field - the public setter
+    // would trigger a second shape rebuild via doRecreateMeshShape
+    const privateProperty = `_${property}`;
+    const previousPropertyValue = component[privateProperty];
 
-    _addEachDescendant(entity) {
-        if (!entity.collision || entity.rigidbody) {
+    const onAssetFullyReady = (asset) => {
+        if (component.entity.collision !== component) {
+            // the component was removed while the asset was loading
             return;
         }
 
-        entity.collision._compoundParent = this;
+        if (component[privateProperty] !== previousPropertyValue) {
+            // the asset has changed since we started loading it, so ignore this callback
+            return;
+        }
+        component[privateProperty] = asset.resource;
+        doRecreateMeshShape(system, component);
+    };
 
-        if (entity !== this.entity) {
-            entity.collision.system.recreatePhysicalShapes(entity.collision);
+    const loadAndHandleAsset = (asset) => {
+        asset.ready((asset) => {
+            if (asset.data.containerAsset) {
+                const containerAsset = assets.get(asset.data.containerAsset);
+                if (containerAsset.loaded) {
+                    onAssetFullyReady(asset);
+                } else {
+                    containerAsset.ready(() => {
+                        onAssetFullyReady(asset);
+                    });
+                    assets.load(containerAsset);
+                }
+            } else {
+                onAssetFullyReady(asset);
+            }
+        });
+
+        assets.load(asset);
+    };
+
+    const asset = assets.get(id);
+    if (asset) {
+        loadAndHandleAsset(asset);
+    } else {
+        assets.once(`add:${id}`, loadAndHandleAsset);
+    }
+}
+
+function recreateMeshShapes(system, component) {
+    if (component._renderAsset || component._asset) {
+        if (component.enabled && component.entity.enabled) {
+            loadMeshAsset(
+                system,
+                component,
+                component._renderAsset || component._asset,
+                component._renderAsset ? 'render' : 'model'
+            );
+            return;
         }
     }
 
-    _updateEachDescendant(entity) {
-        if (!entity.collision) {
-            return;
-        }
+    doRecreateMeshShape(system, component);
+}
 
-        if (entity.collision._compoundParent !== this) {
-            return;
-        }
-
-        entity.collision._compoundParent = null;
-
-        if (entity !== this.entity && !entity.rigidbody) {
-            entity.collision.system.recreatePhysicalShapes(entity.collision);
-        }
-    }
-
-    _updateEachDescendantTransform(entity) {
-        if (!entity.collision || entity.collision._compoundParent !== this.collision._compoundParent) {
-            return;
-        }
-
-        this.collision.system.updateCompoundChildTransform(entity, false);
-    }
+// Returns whether an entity world scale differs from the scale a mesh shape was built with by
+// more than float noise
+function scaleChanged(scale, builtScale) {
+    return Math.abs(scale.x - builtScale.x) > SCALE_CHANGE_TOLERANCE * Math.max(1, Math.abs(builtScale.x)) ||
+           Math.abs(scale.y - builtScale.y) > SCALE_CHANGE_TOLERANCE * Math.max(1, Math.abs(builtScale.y)) ||
+           Math.abs(scale.z - builtScale.z) > SCALE_CHANGE_TOLERANCE * Math.max(1, Math.abs(builtScale.z));
 }
 
 /**
- * Manages creation of {@link CollisionComponent}s.
+ * Manages the {@link CollisionComponent}s of an application. Reach it through
+ * `app.systems.collision`; components are created with {@link Entity#addComponent}, never by
+ * calling the system directly.
  *
  * @category Physics
  */
 class CollisionComponentSystem extends ComponentSystem {
+    /**
+     * The mesh components with a built shape, watched for changes to their entity world scale.
+     * Maintained by createMeshShape and beforeRemove.
+     *
+     * @type {CollisionComponent[]}
+     * @private
+     */
+    _meshComponents = [];
+
     /**
      * Creates a new CollisionComponentSystem instance.
      *
@@ -669,199 +619,287 @@ class CollisionComponentSystem extends ComponentSystem {
         this.id = 'collision';
 
         this.ComponentType = CollisionComponent;
-        this.DataType = CollisionComponentData;
-
-        this.schema = _schema;
-
-        this.implementations = { };
-
-        this._triMeshCache = { };
 
         this.on('beforeremove', this.onBeforeRemove, this);
         this.on('remove', this.onRemove, this);
     }
 
-    initializeComponentData(component, _data, properties) {
-        properties = [
-            'type',
-            'halfExtents',
-            'radius',
-            'axis',
-            'height',
-            'convexHull',
-            'shape',
-            'model',
-            'asset',
-            'render',
-            'renderAsset',
-            'enabled',
-            'linearOffset',
-            'angularOffset',
-            'checkVertexDuplicates'
-        ];
-
-        // duplicate the input data because we are modifying it
-        const data = {};
-        for (let i = 0, len = properties.length; i < len; i++) {
-            const property = properties[i];
-            data[property] = _data[property];
-        }
-
-        // asset takes priority over model
-        // but they are both trying to change the mesh
-        // so remove one of them to avoid conflicts
-        let idx;
-        if (_data.hasOwnProperty('asset')) {
-            idx = properties.indexOf('model');
-            if (idx !== -1) {
-                properties.splice(idx, 1);
-            }
-            idx = properties.indexOf('render');
-            if (idx !== -1) {
-                properties.splice(idx, 1);
-            }
-        } else if (_data.hasOwnProperty('model')) {
-            idx = properties.indexOf('asset');
-            if (idx !== -1) {
-                properties.splice(idx, 1);
-            }
-        }
-
-        if (!data.type) {
-            data.type = component.data.type;
-        }
-        component.data.type = data.type;
-
-        if (Array.isArray(data.halfExtents)) {
-            data.halfExtents = new Vec3(data.halfExtents);
-        }
-
-        if (Array.isArray(data.linearOffset)) {
-            data.linearOffset = new Vec3(data.linearOffset);
-        }
-
-        if (Array.isArray(data.angularOffset)) {
-            // Allow for euler angles to be passed as a 3 length array
-            const values = data.angularOffset;
-            if (values.length === 3) {
-                data.angularOffset = new Quat().setFromEulerAngles(values[0], values[1], values[2]);
-            } else {
-                data.angularOffset = new Quat(data.angularOffset);
-            }
-        }
-
-        const impl = this._createImplementation(data.type);
-        impl.beforeInitialize(component, data);
-
-        super.initializeComponentData(component, data, properties);
-
-        impl.afterInitialize(component, data);
+    /**
+     * The physics backend installed on the rigid body system, or null.
+     *
+     * @type {*}
+     * @ignore
+     */
+    get physicsWorld() {
+        return this.app.systems.rigidbody?.physicsWorld ?? null;
     }
 
-    // Creates an implementation based on the collision type and caches it
-    // in an internal implementations structure, before returning it.
-    _createImplementation(type) {
-        if (this.implementations[type] === undefined) {
-            let impl;
-            switch (type) {
-                case 'box':
-                    impl = new CollisionBoxSystemImpl(this);
-                    break;
-                case 'sphere':
-                    impl = new CollisionSphereSystemImpl(this);
-                    break;
-                case 'capsule':
-                    impl = new CollisionCapsuleSystemImpl(this);
-                    break;
-                case 'cylinder':
-                    impl = new CollisionCylinderSystemImpl(this);
-                    break;
-                case 'cone':
-                    impl = new CollisionConeSystemImpl(this);
-                    break;
-                case 'mesh':
-                    impl = new CollisionMeshSystemImpl(this);
-                    break;
-                case 'compound':
-                    impl = new CollisionCompoundSystemImpl(this);
-                    break;
-                default:
-                    Debug.error(`_createImplementation: Invalid collision system type: ${type}`);
-            }
-            this.implementations[type] = impl;
+    initializeComponentData(component, data) {
+        // resolve the type first - falsy values fall back to the current
+        // type, matching the old initializer, and the private field is
+        // written directly so the type setter does not fire changeType
+        // before the component is initialized
+        if (data.type) {
+            component._type = data.type;
         }
 
-        return this.implementations[type];
-    }
+        // asset takes priority over model and render but they are all trying
+        // to change the mesh, so remove the conflicting inputs
+        let properties = _properties;
+        if (data.asset !== undefined) {
+            properties = properties.filter(p => p !== 'model' && p !== 'render');
+        } else if (data.model !== undefined) {
+            properties = properties.filter(p => p !== 'asset');
+        }
 
-    // Gets an existing implementation for the specified entity
-    _getImplementation(entity) {
-        return this.implementations[entity.collision.data.type];
+        // apply the user-supplied properties through the public setters - all
+        // side effects are gated on _initialized, which is still false here
+        for (const property of properties) {
+            if (data[property] !== undefined) {
+                component[property] = data[property];
+            }
+        }
+
+        const impl = getImpl(component._type);
+        (impl.beforeInitialize ?? beforeInitialize)(this, component);
+
+        super.initializeComponentData(component, data);
+
+        afterInitialize(this, component);
     }
 
     cloneComponent(entity, clone) {
-        return this._getImplementation(entity).clone(entity, clone);
-    }
+        const c = entity.collision;
 
-    onBeforeRemove(entity, component) {
-        this.implementations[component.data.type].beforeRemove(entity, component);
-        component.onBeforeRemove();
-    }
+        // type drives the implementation selection so it is handled outside
+        // the shared property list
+        const data = {
+            enabled: c.enabled,
+            type: c.type
+        };
 
-    onRemove(entity, data) {
-        this.implementations[data.type].remove(entity, data);
-    }
-
-    updateCompoundChildTransform(entity, forceUpdate) {
-        const parentComponent = entity.collision._compoundParent;
-        if (parentComponent === entity.collision) return;
-
-        if (entity.enabled && entity.collision.enabled && (entity._dirtyLocal || forceUpdate)) {
-            const transform = this._getNodeTransform(entity, parentComponent.entity);
-            const idx = parentComponent.getCompoundChildShapeIndex(entity.collision.shape);
-            if (idx === null) {
-                parentComponent.shape.addChildShape(transform, entity.collision.data.shape);
-            } else {
-                parentComponent.shape.updateChildTransform(idx, transform, true);
-            }
-            Ammo.destroy(transform);
+        for (const property of _properties) {
+            data[property] = c[property];
         }
+
+        return this.addComponent(clone, data);
+    }
+
+    /**
+     * Destroys the shape of a component that is being removed and discards the collisions
+     * stored for its entity.
+     *
+     * @param {Entity} entity - The entity the component is being removed from.
+     * @param {CollisionComponent} component - The component being removed.
+     * @private
+     */
+    onBeforeRemove(entity, component) {
+        beforeRemove(this, entity, component);
+        component.onBeforeRemove();
+
+        // discard any stored collisions keyed to this entity so a later entity that reuses the
+        // same GUID (e.g. after reloading the same scene) does not inherit stale tracking
+        if (this.app.systems.rigidbody) {
+            this.app.systems.rigidbody.clearEntityCollisions(entity);
+        }
+    }
+
+    /**
+     * Takes the entity's rigid body out of the simulation and destroys its trigger. Runs once the
+     * component has been removed, and when its shape is torn down to be rebuilt.
+     *
+     * @param {Entity} entity - The entity of the component.
+     * @private
+     */
+    onRemove(entity) {
+        // gate on the backend body, not the public getter - the getter surfaces the NATIVE
+        // body, which backends without native handles keep null
+        if (entity.rigidbody && entity.rigidbody._body) {
+            entity.rigidbody.disableSimulation();
+        }
+
+        if (entity.trigger) {
+            entity.trigger.destroy();
+            delete entity.trigger;
+        }
+    }
+
+    /**
+     * Writes a compound child's pose relative to its compound root into the compound shape,
+     * adding the child when it is absent. Disabled children are skipped. Unless forced, the
+     * write is also skipped when no local transform between the child and the root has changed
+     * since the last write, which is decided from stored local vectors without any matrix math,
+     * so the root moving as a whole costs nothing beyond the comparison.
+     *
+     * @param {Entity} entity - The compound child's entity.
+     * @param {boolean} forceUpdate - Write regardless, for a child known to be absent from the
+     * compound.
+     * @returns {boolean} True if the compound shape was written.
+     * @ignore
+     */
+    updateCompoundChildTransform(entity, forceUpdate) {
+        const component = entity.collision;
+        const parentComponent = component._compoundParent;
+        if (parentComponent === component) return false;
+
+        if (!entity.enabled || !component.enabled) return false;
+
+        const root = parentComponent.entity;
+        let sync = component._compoundSync;
+        if (!forceUpdate && sync && compoundPathUnchanged(sync, entity, root)) {
+            return false;
+        }
+
+        if (!sync) {
+            sync = component._compoundSync = { nodes: [], position: new Vec3(), rotation: new Quat() };
+        }
+        captureCompoundPath(sync, entity, root);
+
+        this._getNodeTransform(entity, root, p3, quat2);
+        if (!forceUpdate && sync.position.equals(p3) && sync.rotation.equals(quat2)) {
+            return false;
+        }
+
+        sync.position.copy(p3);
+        sync.rotation.copy(quat2);
+        this.physicsWorld.updateCompoundChild(parentComponent.shape, component.shape, p3, quat2);
+        return true;
+    }
+
+    /**
+     * Returns true if a compound child is wired to a compound that is still one of its ancestors
+     * and nothing between them has changed since its shape was last written, so the shape is
+     * already where the hierarchy says it should be.
+     *
+     * @param {CollisionComponent} component - The compound child.
+     * @returns {boolean} True if the child's shape is in place.
+     * @ignore
+     */
+    isCompoundChildInPlace(component) {
+        const parentComponent = component._compoundParent;
+        const sync = component._compoundSync;
+        if (!parentComponent || parentComponent === component || !sync) {
+            return false;
+        }
+        return compoundPathUnchanged(sync, component.entity, parentComponent.entity);
     }
 
     _removeCompoundChild(collision, shape) {
-        if (collision.shape.getNumChildShapes() === 0) {
-            return;
-        }
+        this.physicsWorld.removeCompoundChild(collision.shape, shape);
+    }
 
-        if (collision.shape.removeChildShape) {
-            collision.shape.removeChildShape(shape);
-        } else {
-            const ind = collision.getCompoundChildShapeIndex(shape);
-            if (ind !== null) {
-                collision.shape.removeChildShapeByIndex(ind);
-            }
+    /**
+     * Starts watching a mesh component's entity world scale (see _updateMeshScales).
+     *
+     * @param {CollisionComponent} component - The mesh collision component.
+     * @private
+     */
+    _watchMeshScale(component) {
+        if (!this._meshComponents.includes(component)) {
+            this._meshComponents.push(component);
         }
     }
 
-    onTransformChanged(component, position, rotation, scale) {
-        this.implementations[component.data.type].updateTransform(component, position, rotation, scale);
+    /**
+     * Stops watching a component's entity world scale.
+     *
+     * @param {CollisionComponent} component - The collision component.
+     * @private
+     */
+    _unwatchMeshScale(component) {
+        const index = this._meshComponents.indexOf(component);
+        if (index !== -1) {
+            this._meshComponents.splice(index, 1);
+        }
+    }
+
+    /**
+     * Rebuilds the mesh shapes whose entity world scale no longer matches the scale they were
+     * built with. Driven by the rigid body system at the start of each physics step, so like
+     * the other entity to physics syncs it pauses with the simulation and the first step after
+     * resuming catches up.
+     *
+     * @ignore
+     */
+    _updateMeshScales() {
+        const components = this._meshComponents;
+
+        // backwards, so components watched by a nested rebuild (they are appended) wait for the
+        // next step and a removal never skips an entry
+        for (let i = components.length - 1; i >= 0; i--) {
+            const component = components[i];
+            if (!component._shape || !component._builtWorldScale || !component.enabled || !component.entity.enabled) {
+                continue;
+            }
+
+            const entity = component.entity;
+            const scale = getSignedScale(entity.getWorldTransform(), worldScale);
+            if (scaleChanged(scale, component._builtWorldScale) ||
+                scaleSignsChanged(entity, component._builtScaleSigns)) {
+                doRecreateMeshShape(this, component);
+            }
+        }
     }
 
     // Destroys the previous collision type and creates a new one based on the new type provided
     changeType(component, previousType, newType) {
-        this.implementations[previousType].beforeRemove(component.entity, component);
-        this.implementations[previousType].remove(component.entity, component.data);
-        this._createImplementation(newType).reset(component, component.data);
+        beforeRemove(this, component.entity, component);
+        this.onRemove(component.entity);
+
+        const impl = getImpl(newType);
+        (impl.beforeInitialize ?? beforeInitialize)(this, component);
+        afterInitialize(this, component);
     }
 
     // Recreates rigid bodies or triggers for the specified component
     recreatePhysicalShapes(component) {
-        this.implementations[component.data.type].recreatePhysicalShapes(component);
+        const impl = getImpl(component.type);
+        (impl.recreatePhysicalShapes ?? recreateShapes)(this, component);
     }
 
+    /**
+     * Rebuilds a mesh component's shape from its current model or render sources, skipping any
+     * asset loading. Used by the mesh source setters, which assign the resource directly.
+     *
+     * @param {CollisionComponent} component - The mesh collision component to rebuild.
+     * @ignore
+     */
+    doRecreatePhysicalShape(component) {
+        Debug.assert(component._type === 'mesh', 'CollisionComponentSystem#doRecreatePhysicalShape: called for a non-mesh collision component.');
+        doRecreateMeshShape(this, component);
+    }
+
+    /**
+     * An {@link Entity#forEach} callback that wires a descendant of a compound root to it and
+     * rebuilds the descendant's shape. Invoked with `this` set to the compound root component.
+     *
+     * @param {Entity} entity - The visited descendant entity.
+     * @private
+     */
+    _addEachDescendant(entity) {
+        if (!entity.collision || entity.rigidbody) {
+            return;
+        }
+
+        entity.collision._compoundParent = this;
+
+        if (entity !== this.entity) {
+            entity.collision.system.recreatePhysicalShapes(entity.collision);
+        }
+    }
+
+    /**
+     * Writes the transform of a node relative to one of its ancestors to the shared scratch
+     * matrix: the signed world scale of the ancestor, followed by the local transforms of the
+     * nodes below it down to the node itself.
+     *
+     * @param {GraphNode} node - The node.
+     * @param {GraphNode} relative - The ancestor.
+     * @private
+     */
     _calculateNodeRelativeTransform(node, relative) {
         if (node === relative) {
-            const scale = node.getWorldTransform().getScale();
+            const scale = getSignedScale(node.getWorldTransform(), rootScale);
             mat4.setScale(scale.x, scale.y, scale.z);
         } else {
             this._calculateNodeRelativeTransform(node.parent, relative);
@@ -869,13 +907,18 @@ class CollisionComponentSystem extends ComponentSystem {
         }
     }
 
-    _getNodeScaling(node) {
-        const wtm = node.getWorldTransform();
-        const scl = wtm.getScale();
-        return new Ammo.btVector3(scl.x, scl.y, scl.z);
-    }
-
-    _getNodeTransform(node, relative) {
+    /**
+     * Computes a node's pose (with any collision component offsets applied), optionally
+     * relative to an ancestor node, ignoring scale.
+     *
+     * @param {GraphNode} node - The node to read.
+     * @param {GraphNode|null} relative - The ancestor to compute the pose relative to, or null
+     * for the world pose.
+     * @param {Vec3} position - The vector to write the position to.
+     * @param {Quat} rotation - The quaternion to write the rotation to.
+     * @private
+     */
+    _getNodeTransform(node, relative, position, rotation) {
         let pos, rot;
 
         if (relative) {
@@ -890,43 +933,23 @@ class CollisionComponentSystem extends ComponentSystem {
             pos = node.getPosition();
             rot = node.getRotation();
         }
-        const ammoQuat = new Ammo.btQuaternion();
-        const transform = new Ammo.btTransform();
 
-        transform.setIdentity();
-        const origin = transform.getOrigin();
         const component = node.collision;
-
         if (component && component._hasOffset) {
-            const lo = component.data.linearOffset;
-            const ao = component.data.angularOffset;
+            const lo = component.linearOffset;
+            const ao = component.angularOffset;
             const newOrigin = p2;
 
             quat.copy(rot).transformVector(lo, newOrigin);
             newOrigin.add(pos);
             quat.copy(rot).mul(ao);
 
-            origin.setValue(newOrigin.x, newOrigin.y, newOrigin.z);
-            ammoQuat.setValue(quat.x, quat.y, quat.z, quat.w);
+            position.copy(newOrigin);
+            rotation.copy(quat);
         } else {
-            origin.setValue(pos.x, pos.y, pos.z);
-            ammoQuat.setValue(rot.x, rot.y, rot.z, rot.w);
+            position.copy(pos);
+            rotation.copy(rot);
         }
-
-        transform.setRotation(ammoQuat);
-        Ammo.destroy(ammoQuat);
-
-        return transform;
-    }
-
-    destroy() {
-        for (const key in this._triMeshCache) {
-            Ammo.destroy(this._triMeshCache[key]);
-        }
-
-        this._triMeshCache = null;
-
-        super.destroy();
     }
 }
 

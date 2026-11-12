@@ -1,10 +1,13 @@
 export default /* wgsl */`
+// the chunk can be included more than once - by the composition and the effects it composes
+#ifndef _SCREENDEPTH_INCLUDED_
+#define _SCREENDEPTH_INCLUDED_
 
 var uSceneDepthMap: texture_2d<uff>;
 
 #ifndef SCREENSIZE
     #define SCREENSIZE
-    uniform uScreenSize: vec4f;
+    uniform screen_size: vec4f;
 #endif
 
 #ifndef VIEWMATRIX
@@ -48,12 +51,24 @@ fn delinearizeDepth(linearDepth: f32) -> f32 {
 }
 
 // Retrieves rendered linear camera depth by UV
+//
+// Note that there is no SCENE_DEPTHMAP_PACKED decode here, unlike in the GLSL chunk. WebGPU can
+// always render to float textures, so no producer of the scene depth map falls back to packing the
+// depth into RGBA8 on this backend. RenderPassPrepass asserts this.
 fn getLinearScreenDepth(uv: vec2f) -> f32 {
     let textureSize = textureDimensions(uSceneDepthMap, 0);
     let texel: vec2i = vec2i(uv * vec2f(textureSize));
 
     #ifdef SCENE_DEPTHMAP_LINEAR
-        return textureLoad(uSceneDepthMap, texel, 0).r;
+        #ifdef SCENE_DEPTHMAP_RECIPROCAL
+
+            // a coverage weighted average of the reciprocals of the depths, inverted back into a
+            // depth. Zero is a pixel nothing was rendered to, which reads as the far clip.
+            let recip: f32 = textureLoad(uSceneDepthMap, texel, 0).r;
+            return select(uniform.camera_params.y, 1.0 / recip, recip > 0.0);
+        #else
+            return textureLoad(uSceneDepthMap, texel, 0).r;
+        #endif
     #else
         return linearizeDepth(textureLoad(uSceneDepthMap, texel, 0).r);
     #endif
@@ -62,7 +77,7 @@ fn getLinearScreenDepth(uv: vec2f) -> f32 {
 #ifndef VERTEXSHADER
     // Retrieves rendered linear camera depth under the current pixel
     fn getLinearScreenDepthFrag() -> f32 {
-        let uv: vec2f = pcPosition.xy * uniform.uScreenSize.zw;
+        let uv: vec2f = pcPosition.xy * uniform.screen_size.zw;
         return getLinearScreenDepth(uv);
     }
 #endif
@@ -71,4 +86,6 @@ fn getLinearScreenDepth(uv: vec2f) -> f32 {
 fn getLinearDepth(pos: vec3f) -> f32 {
     return -(uniform.matrix_view * vec4f(pos, 1.0)).z;
 }
+
+#endif
 `;

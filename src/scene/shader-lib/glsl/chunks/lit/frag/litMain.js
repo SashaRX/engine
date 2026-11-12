@@ -4,6 +4,11 @@ export default /* glsl */`
 #include "varyingsPS"
 #include "litUserDeclarationPS"
 #include "frontendDeclPS"
+#include "outlineDeclarationPS"
+
+#ifdef CLIP_PLANES
+    #include "clipPlanesPS"
+#endif
 
 #if defined(PICK_PASS) || defined(PREPASS_PASS)
 

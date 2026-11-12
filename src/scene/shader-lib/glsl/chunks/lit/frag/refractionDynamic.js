@@ -5,7 +5,7 @@ uniform vec3 material_attenuation;
 vec3 evalRefractionColor(vec3 refractionVector, float gloss, float refractionIndex) {
 
     // The refraction point is the entry point + vector to exit point
-    vec4 pointOfRefraction = vec4(vPositionW + refractionVector, 1.0);
+    vec4 pointOfRefraction = vec4(litArgs_worldPosition + refractionVector, 1.0);
 
     // Project to texture space so we can sample it
     vec4 projectionPoint = matrix_viewProjection * pointOfRefraction;
@@ -15,7 +15,7 @@ vec3 evalRefractionColor(vec3 refractionVector, float gloss, float refractionInd
 
     // Use IOR and roughness to select mip
     float iorToRoughness = (1.0 - gloss) * clamp((1.0 / refractionIndex) * 2.0 - 2.0, 0.0, 1.0);
-    float refractionLod = log2(uScreenSize.x) * iorToRoughness;
+    float refractionLod = log2(screen_size.x) * iorToRoughness;
     vec3 refraction = texture2DLod(uSceneColorMap, uv, refractionLod).rgb;
 
     // Convert from gamma to linear space if needed
@@ -42,14 +42,9 @@ void addRefraction(
 #endif
 ) {
 
-    // Extract scale from the model transform
-    vec3 modelScale;
-    modelScale.x = length(vec3(matrix_model[0].xyz));
-    modelScale.y = length(vec3(matrix_model[1].xyz));
-    modelScale.z = length(vec3(matrix_model[2].xyz));
-
-    // Calculate the refraction vector, scaled by the thickness and scale of the object
-    vec3 scale = thickness * modelScale;
+    // Calculate the refraction vector, scaled by the thickness and the scale of the model matrix,
+    // passed from the vertex shader
+    vec3 scale = thickness * vModelScale;
     vec3 refractionVector = normalize(refract(-viewDir, worldNormal, refractionIndex)) * scale;
     vec3 refraction = evalRefractionColor(refractionVector, gloss, refractionIndex);
 

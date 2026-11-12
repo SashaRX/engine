@@ -12,26 +12,33 @@ fn getCenter() -> vec3f {
     return vec3f(bitcast<f32>(cachedTransformA.r), bitcast<f32>(cachedTransformA.g), bitcast<f32>(cachedTransformA.b));
 }
 
+// Anti-aliasing flag stored in the lowest bit of center.x by writeSplat. Call after getCenter().
+fn getAntiAlias() -> bool {
+    return (cachedTransformA.r & 1u) != 0u;
+}
+
+// opacity as the SOG v3 byte (see containerCompactWrite): 0..1.5625
 fn getOpacity() -> f32 {
-    return f32(cachedTransformA.a >> 24u) / 255.0;
+    let o = f32(cachedTransformA.a >> 24u) / 204.0;
+    return o * o;
 }
 
 fn getColor() -> vec3f {
-    let packed = loadDataColor().x;
-    let r = f32(packed & 0x7FFu) * (4.0 / 2047.0);
-    let g = f32((packed >> 11u) & 0x7FFu) * (4.0 / 2047.0);
-    let b = f32((packed >> 22u) & 0x3FFu) * (4.0 / 1023.0);
+    let data = loadDataColor().x;
+    let r = f32(data & 0x7FFu) * (4.0 / 2047.0);
+    let g = f32((data >> 11u) & 0x7FFu) * (4.0 / 2047.0);
+    let b = f32((data >> 22u) & 0x3FFu) * (4.0 / 1023.0);
     return vec3f(r, g, b);
 }
 
 fn getRotation() -> vec4f {
-    let packed = loadDataTransformB().x;
+    let data = loadDataTransformB().x;
 
     // dequantize half-angle projected quaternion: 11+11+10 bits to [-1, 1]
     let p = vec3f(
-        f32(packed & 0x7FFu) / 2047.0 * 2.0 - 1.0,
-        f32((packed >> 11u) & 0x7FFu) / 2047.0 * 2.0 - 1.0,
-        f32((packed >> 22u) & 0x3FFu) / 1023.0 * 2.0 - 1.0
+        f32(data & 0x7FFu) / 2047.0 * 2.0 - 1.0,
+        f32((data >> 11u) & 0x7FFu) / 2047.0 * 2.0 - 1.0,
+        f32((data >> 22u) & 0x3FFu) / 1023.0 * 2.0 - 1.0
     );
 
     // inverse half-angle transform, returns (w, x, y, z) format
@@ -40,10 +47,10 @@ fn getRotation() -> vec4f {
 }
 
 fn getScale() -> vec3f {
-    let packed = cachedTransformA.a;
-    let sx = f32(packed & 0xFFu);
-    let sy = f32((packed >> 8u) & 0xFFu);
-    let sz = f32((packed >> 16u) & 0xFFu);
+    let data = cachedTransformA.a;
+    let sx = f32(data & 0xFFu);
+    let sy = f32((data >> 8u) & 0xFFu);
+    let sz = f32((data >> 16u) & 0xFFu);
 
     // decode log-encoded scale: 0 = true zero, 1-255 maps linearly in log-space to e^-12..e^9
     let logRange = 21.0 / 255.0;

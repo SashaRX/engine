@@ -1,9 +1,10 @@
 import { Debug } from '../../core/debug.js';
 import { hashCode } from '../../core/hash.js';
+import { BitPacking } from '../../core/math/bit-packing.js';
 import { math } from '../../core/math/math.js';
 import { StringIds } from '../../core/string-ids.js';
 import {
-    SEMANTIC_TEXCOORD0, SEMANTIC_TEXCOORD1, SEMANTIC_ATTR12, SEMANTIC_ATTR11, SEMANTIC_ATTR14, SEMANTIC_ATTR15,
+    SEMANTIC_TEXCOORD, SEMANTIC_ATTR12, SEMANTIC_ATTR11, SEMANTIC_ATTR14, SEMANTIC_ATTR15,
     SEMANTIC_COLOR, SEMANTIC_TANGENT, TYPE_FLOAT32, typedArrayTypesByteSize, vertexTypesNames
 } from './constants.js';
 import { DeviceCache } from './device-cache.js';
@@ -124,22 +125,24 @@ class VertexFormat {
      * vertex format will be interleaved. (example: PNCPNCPNCPNC).
      * @example
      * // Specify 3-component positions (x, y, z)
-     * const vertexFormat = new pc.VertexFormat(graphicsDevice, [
-     *     { semantic: pc.SEMANTIC_POSITION, components: 3, type: pc.TYPE_FLOAT32 }
+     * const vertexFormat = new VertexFormat(graphicsDevice, [
+     *     { semantic: SEMANTIC_POSITION, components: 3, type: TYPE_FLOAT32 }
      * ]);
      * @example
      * // Specify 2-component positions (x, y), a texture coordinate (u, v) and a vertex color (r, g, b, a)
-     * const vertexFormat = new pc.VertexFormat(graphicsDevice, [
-     *     { semantic: pc.SEMANTIC_POSITION, components: 2, type: pc.TYPE_FLOAT32 },
-     *     { semantic: pc.SEMANTIC_TEXCOORD0, components: 2, type: pc.TYPE_FLOAT32 },
-     *     { semantic: pc.SEMANTIC_COLOR, components: 4, type: pc.TYPE_UINT8, normalize: true }
+     * const vertexFormat = new VertexFormat(graphicsDevice, [
+     *     { semantic: SEMANTIC_POSITION, components: 2, type: TYPE_FLOAT32 },
+     *     { semantic: SEMANTIC_TEXCOORD0, components: 2, type: TYPE_FLOAT32 },
+     *     { semantic: SEMANTIC_COLOR, components: 4, type: TYPE_UINT8, normalize: true }
      * ]);
      */
     constructor(graphicsDevice, description, vertexCount) {
         this.device = graphicsDevice;
         this._elements = [];
-        this.hasUv0 = false;
-        this.hasUv1 = false;
+
+        // bit i is set when the format contains SEMANTIC_TEXCOORDi
+        this._uvMask = 0;
+
         this.hasColor = false;
         this.hasTangents = false;
         this.verticesByteSize = 0;
@@ -194,10 +197,10 @@ class VertexFormat {
                 offset += Math.ceil(elementSize / 4) * 4;
             }
 
-            if (elementDesc.semantic === SEMANTIC_TEXCOORD0) {
-                this.hasUv0 = true;
-            } else if (elementDesc.semantic === SEMANTIC_TEXCOORD1) {
-                this.hasUv1 = true;
+            if (elementDesc.semantic.startsWith(SEMANTIC_TEXCOORD)) {
+                const uvIndex = parseInt(elementDesc.semantic.substring(SEMANTIC_TEXCOORD.length), 10);
+                Debug.assert(uvIndex >= 0 && uvIndex < 8, `Unsupported texture coordinate semantic ${elementDesc.semantic}`);
+                this._uvMask = BitPacking.set(this._uvMask, 1, uvIndex);
             } else if (elementDesc.semantic === SEMANTIC_COLOR) {
                 this.hasColor = true;
             } else if (elementDesc.semantic === SEMANTIC_TANGENT) {
@@ -217,7 +220,33 @@ class VertexFormat {
     }
 
     /**
+     * The texture coordinate sets contained in the format, as a bit mask with bit i set when the
+     * format contains the semantic {@link SEMANTIC_TEXCOORD0} + i.
+     *
+     * @type {number}
+     * @ignore
+     */
+    get uvMask() {
+        return this._uvMask;
+    }
+
+    /**
+     * Returns true if the format contains the texture coordinate set with the specified index.
+     *
+     * @param {number} index - The index of the texture coordinate set, from 0 for
+     * {@link SEMANTIC_TEXCOORD0} to 7 for {@link SEMANTIC_TEXCOORD7}.
+     * @returns {boolean} True if the format contains the texture coordinate set.
+     */
+    hasUv(index) {
+        return BitPacking.any(this._uvMask, index);
+    }
+
+    /**
      * The {@link VertexFormat} used to store matrices of type {@link Mat4} for hardware instancing.
+     * The matrix rows use {@link SEMANTIC_ATTR11}, {@link SEMANTIC_ATTR12}, {@link SEMANTIC_ATTR14}
+     * and {@link SEMANTIC_ATTR15}. The first two share their attribute locations with
+     * {@link SEMANTIC_TEXCOORD6} and {@link SEMANTIC_TEXCOORD7}, so a shader reading those texture
+     * coordinate sets needs a custom instancing format on other attributes.
      *
      * @param {GraphicsDevice} graphicsDevice - The graphics device used to create this vertex
      * format.
@@ -234,6 +263,16 @@ class VertexFormat {
                 { semantic: SEMANTIC_ATTR15, components: 4, type: TYPE_FLOAT32 }
             ]);
         });
+    }
+
+    /**
+     * @deprecated Use VertexFormat.getDefaultInstancingFormat(graphicsDevice).
+     * @returns {null} Always null.
+     * @ignore
+     */
+    static get defaultInstancingFormat() {
+        Debug.removed('VertexFormat.defaultInstancingFormat was removed. Use VertexFormat.getDefaultInstancingFormat(graphicsDevice).');
+        return null;
     }
 
     static isElementValid(graphicsDevice, elementDesc) {

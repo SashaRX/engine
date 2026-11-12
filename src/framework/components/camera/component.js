@@ -1,5 +1,5 @@
 import { Debug } from '../../../core/debug.js';
-import { ASPECT_AUTO, LAYERID_UI, LAYERID_DEPTH } from '../../../scene/constants.js';
+import { LAYERID_UI, LAYERID_DEPTH, SHADER_FORWARD } from '../../../scene/constants.js';
 import { Camera } from '../../../scene/camera.js';
 import { ShaderPass } from '../../../scene/shader-pass.js';
 import { Component } from '../component.js';
@@ -14,9 +14,14 @@ import { PostEffectQueue } from './post-effect-queue.js';
  * @import { LayerComposition } from '../../../scene/composition/layer-composition.js'
  * @import { Layer } from '../../../scene/layer.js'
  * @import { Mat4 } from '../../../core/math/mat4.js'
+ * @import { Plane } from '../../../core/shape/plane.js'
+ * @import { ComputePass } from '../../../platform/graphics/compute-pass.js'
  * @import { FramePass } from '../../../platform/graphics/frame-pass.js'
  * @import { RenderTarget } from '../../../platform/graphics/render-target.js'
+ * @import { SceneColorMapHandle } from '../../../platform/graphics/scene-color-map-handle.js'
+ * @import { SceneDepthMapHandle } from '../../../platform/graphics/scene-depth-map-handle.js'
  * @import { FogParams } from '../../../scene/fog-params.js'
+ * @import { Vec2 } from '../../../core/math/vec2.js'
  * @import { Vec3 } from '../../../core/math/vec3.js'
  * @import { Vec4 } from '../../../core/math/vec4.js'
  * @import { XrErrorCallback } from '../../xr/xr-manager.js'
@@ -43,7 +48,7 @@ import { PostEffectQueue } from './post-effect-queue.js';
  * to an {@link Entity}, use {@link Entity#addComponent}:
  *
  * ```javascript
- * const entity = new pc.Entity();
+ * const entity = new Entity();
  * entity.addComponent('camera', {
  *     nearClip: 1,
  *     farClip: 100,
@@ -59,6 +64,10 @@ import { PostEffectQueue } from './post-effect-queue.js';
  *
  * console.log(entity.camera.nearClip); // Get the near clip of the camera
  * ```
+ *
+ * For ready-made camera behavior, attach the `CameraControls` script from
+ * `playcanvas/scripts/esm/camera-controls.mjs`, which provides orbit, fly and pan driven by mouse,
+ * touch and gamepad input.
  *
  * Relevant Engine API examples:
  *
@@ -192,6 +201,9 @@ class CameraComponent extends Component {
      * - {@link SHADERPASS_LIGHTING}
      * - {@link SHADERPASS_UV0}
      *
+     * The returned index can be used with {@link MeshInstance#shaderPassMask} to control which mesh
+     * instances are rendered in this pass.
+     *
      * @returns {number} The id of the shader pass.
      */
     setShaderPass(name) {
@@ -201,7 +213,9 @@ class CameraComponent extends Component {
         }) : null;
         this._camera.shaderPassInfo = shaderPassInfo;
 
-        return shaderPassInfo.index;
+        // without a name the camera renders the forward pass, which is also the index the
+        // renderer falls back to for a camera with no shader pass info
+        return shaderPassInfo?.index ?? SHADER_FORWARD;
     }
 
     /**
@@ -214,11 +228,13 @@ class CameraComponent extends Component {
     }
 
     /**
-     * Sets the frame passes the camera uses for rendering, instead of its default rendering.
-     * Set this to null to return to the default behavior.
+     * Sets the frame passes the camera uses for rendering, instead of its default rendering. They
+     * execute in the order of the array, and a {@link RenderPassForward} among them renders layers
+     * of the scene with the camera, see its example. Set this to null to return to the default
+     * behavior. The camera does not destroy the passes: whoever adds a pass removes it from the
+     * list, and destroys it.
      *
-     * @type {FramePass[]|null}
-     * @ignore
+     * @param {FramePass[]|null} passes - The frame passes, or null for the default behavior.
      */
     set framePasses(passes) {
         this._camera.framePasses = passes || [];
@@ -230,15 +246,43 @@ class CameraComponent extends Component {
      * Gets the frame passes the camera uses for rendering, instead of its default rendering.
      *
      * @type {FramePass[]}
-     * @ignore
      */
     get framePasses() {
         return this._camera.framePasses;
     }
 
     /**
+     * Gets the frame passes which execute before the camera's main scene rendering, after its
+     * directional shadow passes. When the camera renders using its own frame passes, they execute
+     * before the first of those rendering the camera's layers, and do not execute when none of
+     * them does. They cannot include a pass rendering the layers of a camera, such as a
+     * RenderPassForward. When rendering multiple XR views, they execute for each view, apart from
+     * a compute pass, which executes once, as selected by {@link ComputePass#xrViewIndex}. Add
+     * passes to the array, or remove them from it, to change them. The camera does not destroy
+     * them: whoever adds a pass destroys it.
+     *
+     * @type {FramePass[]}
+     */
+    get beforePasses() {
+        return this._camera.beforePasses;
+    }
+
+    /**
+     * Gets the frame passes which execute after everything the camera renders in the frame,
+     * including its frame passes when it uses those, and before the cameras rendering after it.
+     * When rendering multiple XR views, they execute once, after all the views. Add passes to the
+     * array, or remove them from it, to change them. The camera does not destroy them: whoever
+     * adds a pass destroys it.
+     *
+     * @type {FramePass[]}
+     */
+    get afterPasses() {
+        return this._camera.afterPasses;
+    }
+
+    /**
      * @type {FramePass[]|null}
-     * @deprecated Use {@link framePasses} instead.
+     * @deprecated Use `framePasses` instead.
      * @ignore
      */
     set renderPasses(passes) {
@@ -248,7 +292,7 @@ class CameraComponent extends Component {
 
     /**
      * @type {FramePass[]}
-     * @deprecated Use {@link framePasses} instead.
+     * @deprecated Use `framePasses` instead.
      * @ignore
      */
     get renderPasses() {
@@ -300,6 +344,8 @@ class CameraComponent extends Component {
      * - {@link TONEMAP_ACES}
      * - {@link TONEMAP_ACES2}
      * - {@link TONEMAP_NEUTRAL}
+     * - {@link TONEMAP_AGX}
+     * - {@link TONEMAP_AGX_PUNCHY}
      *
      * Defaults to {@link TONEMAP_LINEAR}.
      *
@@ -335,6 +381,67 @@ class CameraComponent extends Component {
      */
     get fog() {
         return this._camera.fogParams;
+    }
+
+    /**
+     * Sets the planes that clip what the camera renders, in world space. The parts of the meshes
+     * behind any of the planes - on the side opposite to the plane normal - are not rendered, which
+     * cuts the scene open along the planes, as a section view does. Use {@link clipIntersection}
+     * to clip only the parts behind all of the planes instead. Up to 8 planes are supported, and
+     * any more are ignored. Defaults to an empty array.
+     *
+     * The planes clip the meshes the camera renders with a {@link StandardMaterial}, or with a
+     * {@link ShaderMaterial} that supports clipping, see {@link MeshInstance#clippingPlanes}. They
+     * apply to all passes of the camera, including picking with a {@link Picker}, but not to
+     * shadows, which the meshes cast whole, nor to screen space elements. Physics and other queries
+     * on the CPU are not clipped. To clip only some meshes, or their shadows too, use
+     * {@link RenderComponent#clippingPlanes}. A mesh with planes of its own is clipped by both
+     * sets: each clips with its own {@link clipIntersection}, and a part that either set clips is
+     * not rendered.
+     *
+     * The planes are copied, so changing a plane after the assignment has no effect until the
+     * array is assigned again. Giving the camera its first plane compiles new variants of the
+     * shaders it renders - moving the planes or changing their number does not.
+     *
+     * @type {Plane[]}
+     * @example
+     * // show the floors of a building below a height of 3
+     * entity.camera.clippingPlanes = [
+     *     new Plane().setFromPointNormal(new Vec3(0, 3, 0), Vec3.DOWN)
+     * ];
+     */
+    set clippingPlanes(value) {
+        this._camera.clippingPlanes = value;
+    }
+
+    /**
+     * Gets the planes that clip what the camera renders, in world space. These are copies of the
+     * assigned planes, and changing them has no effect until the array is assigned again.
+     *
+     * @type {Plane[]}
+     */
+    get clippingPlanes() {
+        return this._camera.clippingPlanes;
+    }
+
+    /**
+     * Sets whether only the parts behind all of the {@link clippingPlanes} are clipped, instead of
+     * the parts behind any of them. With two planes this cuts a wedge out of the scene, and with
+     * three a corner. Defaults to false.
+     *
+     * @type {boolean}
+     */
+    set clipIntersection(value) {
+        this._camera.clipIntersection = value;
+    }
+
+    /**
+     * Gets whether only the parts behind all of the {@link clippingPlanes} are clipped.
+     *
+     * @type {boolean}
+     */
+    get clipIntersection() {
+        return this._camera.clipIntersection;
     }
 
     /**
@@ -411,7 +518,7 @@ class CameraComponent extends Component {
      *
      * Left and right are only used in stereo rendering.
      *
-     * @type {CalculateMatrixCallback}
+     * @type {CalculateMatrixCallback|null}
      */
     set calculateProjection(value) {
         this._camera.calculateProjection = value;
@@ -420,7 +527,7 @@ class CameraComponent extends Component {
     /**
      * Gets the custom function to calculate the camera projection matrix manually.
      *
-     * @type {CalculateMatrixCallback}
+     * @type {CalculateMatrixCallback|null}
      */
     get calculateProjection() {
         return this._camera.calculateProjection;
@@ -435,7 +542,7 @@ class CameraComponent extends Component {
      *
      * Left and right are only used in stereo rendering.
      *
-     * @type {CalculateMatrixCallback}
+     * @type {CalculateMatrixCallback|null}
      */
     set calculateTransform(value) {
         this._camera.calculateTransform = value;
@@ -444,7 +551,7 @@ class CameraComponent extends Component {
     /**
      * Gets the custom function to calculate the camera transformation matrix manually.
      *
-     * @type {CalculateMatrixCallback}
+     * @type {CalculateMatrixCallback|null}
      */
     get calculateTransform() {
         return this._camera.calculateTransform;
@@ -461,7 +568,10 @@ class CameraComponent extends Component {
     }
 
     /**
-     * Sets the camera component's clear color. Defaults to `[0.75, 0.75, 0.75, 1]`.
+     * Sets the camera component's clear color. Defaults to `[0.75, 0.75, 0.75, 1]`. When the camera
+     * renders to a {@link RenderTarget} with multiple color buffers, this is the clear color of
+     * the color attachment 0, and also of the other attachments unless they are given their own
+     * using {@link CameraComponent#setClearColor}.
      *
      * @type {Color}
      */
@@ -476,6 +586,35 @@ class CameraComponent extends Component {
      */
     get clearColor() {
         return this._camera.clearColor;
+    }
+
+    /**
+     * Sets the clear color of a color attachment of the camera's render target, which allows the
+     * color buffers of a {@link RenderTarget} with multiple color buffers to clear to different
+     * colors. The attachment 0 clears to {@link CameraComponent#clearColor}, and the other
+     * attachments clear to the same color unless given their own here. Pass null to remove the
+     * color of an attachment, so that it clears to the attachment 0 color again. The components
+     * of the clear color of an integer format attachment are the integer values to clear to.
+     *
+     * @param {number} index - The index of the color attachment.
+     * @param {Color|null} color - The clear color, specified in sRGB space, or null to clear to
+     * the color of the attachment 0.
+     * @example
+     * // clear the second color buffer of the render target to a different color
+     * entity.camera.setClearColor(1, new pc.Color(0.5, 0.5, 1, 1));
+     */
+    setClearColor(index, color) {
+        this._camera.setClearColor(index, color);
+    }
+
+    /**
+     * Gets the clear color of a color attachment of the camera's render target.
+     *
+     * @param {number} index - The index of the color attachment.
+     * @returns {Color} The clear color of the attachment.
+     */
+    getClearColor(index) {
+        return this._camera.getClearColor(index);
     }
 
     /**
@@ -577,9 +716,11 @@ class CameraComponent extends Component {
      * Sets the layer id of the layer on which the post-processing of the camera stops being applied
      * to. Defaults to {@link LAYERID_UI}, which causes post-processing to not be applied to UI
      * layer and any following layers for the camera. Set to `undefined` for post-processing to be
-     * applied to all layers of the camera.
+     * applied to all layers of the camera. Only applies to the deprecated post effects queue.
      *
      * @type {number}
+     * @deprecated Use {@link CameraFrame} instead.
+     * @ignore
      */
     set disablePostEffectsLayer(layer) {
         this._disablePostEffectsLayer = layer;
@@ -591,6 +732,8 @@ class CameraComponent extends Component {
      * to.
      *
      * @type {number}
+     * @deprecated Use {@link CameraFrame} instead.
+     * @ignore
      */
     get disablePostEffectsLayer() {
         return this._disablePostEffectsLayer;
@@ -603,6 +746,7 @@ class CameraComponent extends Component {
      */
     set farClip(value) {
         this._camera.farClip = value;
+        this.fire('set:farClip', value);
     }
 
     /**
@@ -737,7 +881,7 @@ class CameraComponent extends Component {
     /**
      * Gets the array of layer IDs ({@link Layer#id}) to which this camera belongs.
      *
-     * @type {number[]}
+     * @type {ReadonlyArray<number>}
      */
     get layers() {
         return this._camera.layers;
@@ -775,6 +919,7 @@ class CameraComponent extends Component {
      */
     set nearClip(value) {
         this._camera.nearClip = value;
+        this.fire('set:nearClip', value);
     }
 
     /**
@@ -810,11 +955,17 @@ class CameraComponent extends Component {
      * camera.
      *
      * @type {PostEffectQueue}
+     * @deprecated Use {@link CameraFrame} instead.
+     * @ignore
      */
     get postEffects() {
         return this._postEffects;
     }
 
+    /**
+     * @type {boolean}
+     * @ignore
+     */
     get postEffectsEnabled() {
         return this._postEffects.enabled;
     }
@@ -874,8 +1025,42 @@ class CameraComponent extends Component {
     }
 
     /**
+     * Sets the offset of the projection window from the view direction, creating an off-center
+     * (asymmetric) projection. The offset is expressed in half-frustum units - an offset of
+     * `(0, 1)` moves the projection window up by half of the frustum height. Applies to both
+     * perspective and orthographic projections and is ignored in XR, where the projection is
+     * supplied by the XR system. Defaults to `(0, 0)`.
+     *
+     * A typical use case is perspective correction (shift lens): keep the camera level and use
+     * a vertical offset to frame a tall object, so its vertical lines stay parallel:
+     *
+     * @example
+     * // frame content that is `pitch` degrees above the horizon, without tilting the camera
+     * const fovY = entity.camera.fov * math.DEG_TO_RAD;
+     * const shift = Math.tan(pitch * math.DEG_TO_RAD) / Math.tan(fovY / 2);
+     * entity.camera.projectionOffset = new Vec2(0, shift);
+     * @type {Vec2}
+     */
+    set projectionOffset(value) {
+        this._camera.projectionOffset = value;
+    }
+
+    /**
+     * Gets the offset of the projection window.
+     *
+     * @type {Vec2}
+     */
+    get projectionOffset() {
+        return this._camera.projectionOffset;
+    }
+
+    /**
      * Sets the rendering rectangle for the camera. This controls where on the screen the camera
      * will render in normalized screen coordinates. Defaults to `[0, 0, 1, 1]`.
+     *
+     * The rectangle can extend past the render target bounds, for example `[-0.5, 0, 1.5, 1]`,
+     * with only its overlapping part being rendered. This is supported on WebGL2, and on WebGPU
+     * on platforms that allow viewports extending past the render target bounds.
      *
      * @type {Vec4}
      */
@@ -887,7 +1072,7 @@ class CameraComponent extends Component {
     /**
      * Gets the rendering rectangle for the camera.
      *
-     * @type {Vec4}
+     * @type {Readonly<Vec4>}
      */
     get rect() {
         return this._camera.rect;
@@ -897,7 +1082,7 @@ class CameraComponent extends Component {
         if (value && !this._sceneColorMapRequested) {
             this.requestSceneColorMap(true);
             this._sceneColorMapRequested = true;
-        } else if (this._sceneColorMapRequested) {
+        } else if (!value && this._sceneColorMapRequested) {
             this.requestSceneColorMap(false);
             this._sceneColorMapRequested = false;
         }
@@ -911,7 +1096,7 @@ class CameraComponent extends Component {
         if (value && !this._sceneDepthMapRequested) {
             this.requestSceneDepthMap(true);
             this._sceneDepthMapRequested = true;
-        } else if (this._sceneDepthMapRequested) {
+        } else if (!value && this._sceneDepthMapRequested) {
             this.requestSceneDepthMap(false);
             this._sceneDepthMapRequested = false;
         }
@@ -922,10 +1107,82 @@ class CameraComponent extends Component {
     }
 
     /**
+     * Gets the handle to the scene depth map of this camera. The handle is the same object for the
+     * lifetime of the camera, and identifies the depth map the camera rendered most recently. The
+     * camera only renders the depth map when requested, see {@link CameraComponent#requestSceneDepthMap},
+     * or when its {@link CameraFrame} is configured to.
+     *
+     * @type {SceneDepthMapHandle}
+     */
+    get sceneDepthMapHandle() {
+        return this._camera.sceneDepthMapHandle;
+    }
+
+    /**
+     * Gets the handle to the scene color map of this camera. The handle is the same object for the
+     * lifetime of the camera, and identifies the color map the camera rendered most recently. The
+     * camera only renders the color map when requested, see {@link CameraComponent#requestSceneColorMap},
+     * or when its {@link CameraFrame} is configured to.
+     *
+     * @type {SceneColorMapHandle}
+     */
+    get sceneColorMapHandle() {
+        return this._camera.sceneColorMapHandle;
+    }
+
+    /**
+     * Sets whether the scene color map of this camera has mipmaps. Rough refractive materials
+     * sample its small mip levels, which blur what is behind them. Without mipmaps, they sample the
+     * full resolution map, and refract sharply. This saves generating the mipmaps each frame, and
+     * the memory of about a third of the map, where only sharp refraction is needed, such as of
+     * clear glass or a heat haze. Defaults to true.
+     *
+     * @type {boolean}
+     */
+    set sceneColorMapMipmaps(value) {
+        this._camera.sceneColorMapMipmaps = value;
+    }
+
+    /**
+     * Gets whether the scene color map of this camera has mipmaps.
+     *
+     * @type {boolean}
+     */
+    get sceneColorMapMipmaps() {
+        return this._camera.sceneColorMapMipmaps;
+    }
+
+    /**
+     * Sets the filter used to generate the mipmaps of the scene color map of this camera, when it
+     * has them, see {@link CameraComponent#sceneColorMapMipmaps}. Can be:
+     *
+     * - {@link MIPMAPFILTER_BOX}: averages each block of 2x2 texels of the previous mip level.
+     * - {@link MIPMAPFILTER_GAUSSIAN}: a wider, smooth filter, which avoids the blocks and the
+     * flickering of the box filter in the blurred refraction, at a higher cost of generating the
+     * mipmaps.
+     *
+     * Defaults to {@link MIPMAPFILTER_BOX}. See {@link Texture#mipmapFilter}.
+     *
+     * @type {string}
+     */
+    set sceneColorMapMipmapFilter(value) {
+        this._camera.sceneColorMapMipmapFilter = value;
+    }
+
+    /**
+     * Gets the filter used to generate the mipmaps of the scene color map of this camera.
+     *
+     * @type {string}
+     */
+    get sceneColorMapMipmapFilter() {
+        return this._camera.sceneColorMapMipmapFilter;
+    }
+
+    /**
      * Sets the render target to which rendering of the camera is performed. If not set, it will
      * render simply to the screen.
      *
-     * @type {RenderTarget}
+     * @type {RenderTarget|null}
      */
     set renderTarget(value) {
 
@@ -942,7 +1199,7 @@ class CameraComponent extends Component {
     /**
      * Gets the render target to which rendering of the camera is performed.
      *
-     * @type {RenderTarget}
+     * @type {RenderTarget|null}
      */
     get renderTarget() {
         return this._camera.renderTarget;
@@ -1044,7 +1301,7 @@ class CameraComponent extends Component {
     /**
      * Request the scene to generate a texture containing the scene color map. Note that this call
      * is accumulative, and for each enable request, a disable request need to be called. Note that
-     * this setting is ignored when {@link framePasses} is used.
+     * this setting is ignored when `framePasses` is used.
      *
      * @param {boolean} enabled - True to request the generation, false to disable it.
      */
@@ -1063,7 +1320,7 @@ class CameraComponent extends Component {
     /**
      * Request the scene to generate a texture containing the scene depth map. Note that this call
      * is accumulative, and for each enable request, a disable request need to be called. Note that
-     * this setting is ignored when {@link framePasses} is used.
+     * this setting is ignored when `framePasses` is used.
      *
      * @param {boolean} enabled - True to request the generation, false to disable it.
      */
@@ -1088,41 +1345,78 @@ class CameraComponent extends Component {
     /**
      * Convert a point from 2D screen space to 3D world space.
      *
-     * @param {number} screenx - X coordinate on PlayCanvas' canvas element. Should be in the range
-     * 0 to `canvas.offsetWidth` of the application's canvas element.
-     * @param {number} screeny - Y coordinate on PlayCanvas' canvas element. Should be in the range
-     * 0 to `canvas.offsetHeight` of the application's canvas element.
+     * By default, screen space is measured in CSS pixels of the application's canvas element, the
+     * units of mouse and touch event positions, not device pixels. The canvas size used for the
+     * conversion is measured on the page once per application update; an `OffscreenCanvas` uses its
+     * `width` and `height` instead. A canvas that is not laid out on the page - detached, hidden
+     * with `display: none`, or not laid out yet - measures zero, and the returned coordinate is
+     * then not finite.
+     *
+     * Pass `width` and `height` to measure screen space in other units: for example
+     * {@link GraphicsDevice#width} and {@link GraphicsDevice#height} for device pixels, or the size
+     * of the camera's render target when it is used as a texture.
+     *
+     * @param {number} screenx - X coordinate in screen space, in the range 0 to `width`.
+     * @param {number} screeny - Y coordinate in screen space, in the range 0 to `height`.
      * @param {number} cameraz - The distance from the camera in world space to create the new
      * point.
      * @param {Vec3} [worldCoord] - 3D vector to receive world coordinate result.
+     * @param {number} [width] - The width of screen space. Defaults to the width of the canvas
+     * element in CSS pixels.
+     * @param {number} [height] - The height of screen space. Defaults to the height of the canvas
+     * element in CSS pixels.
      * @example
      * // Get the start and end points of a 3D ray fired from a screen click position
      * const start = entity.camera.screenToWorld(clickX, clickY, entity.camera.nearClip);
      * const end = entity.camera.screenToWorld(clickX, clickY, entity.camera.farClip);
      *
      * // Use the ray coordinates to perform a raycast
-     * app.systems.rigidbody.raycastFirst(start, end, function (result) {
-     *     console.log("Entity " + result.entity.name + " was selected");
-     * });
+     * const result = app.systems.rigidbody.raycastFirst(start, end);
+     * if (result) {
+     *     console.log(`Entity ${result.entity.name} was selected`);
+     * }
      * @returns {Vec3} The world space coordinate.
      */
-    screenToWorld(screenx, screeny, cameraz, worldCoord) {
-        const device = this.system.app.graphicsDevice;
-        const { width, height } = device.clientRect;
-        return this._camera.screenToWorld(screenx, screeny, cameraz, width, height, worldCoord);
+    screenToWorld(screenx, screeny, cameraz, worldCoord, width, height) {
+        const { clientRect } = this.system.app.graphicsDevice;
+        return this._camera.screenToWorld(screenx, screeny, cameraz, width ?? clientRect.width, height ?? clientRect.height, worldCoord);
     }
 
     /**
      * Convert a point from 3D world space to 2D screen space.
      *
+     * By default, the returned `x` and `y` are in CSS pixels of the application's canvas element,
+     * the units of mouse and touch event positions, not device pixels. The canvas size used for the
+     * conversion is measured on the page once per application update; an `OffscreenCanvas` uses its
+     * `width` and `height` instead. A canvas that is not laid out on the page - detached, hidden
+     * with `display: none`, or not laid out yet - measures zero, and `x` and `y` are then zero.
+     *
+     * Pass `width` and `height` to measure screen space in other units: for example
+     * {@link GraphicsDevice#width} and {@link GraphicsDevice#height} for device pixels, or the size
+     * of the camera's render target when it is used as a texture.
+     *
+     * The returned `z` is the unnormalized clip space depth, not a behind-the-camera flag: it also
+     * goes negative for points in front of a perspective camera that are nearer than twice the
+     * near clip, and for an orthographic camera it is negative across the whole near half of the
+     * depth range. To reject points behind the camera, test the view space depth instead - pass
+     * the world position through {@link CameraComponent#viewMatrix} and discard it when the
+     * resulting `z` is zero or greater.
+     *
      * @param {Vec3} worldCoord - The world space coordinate.
      * @param {Vec3} [screenCoord] - 3D vector to receive screen coordinate result.
+     * @param {number} [width] - The width of screen space. Defaults to the width of the canvas
+     * element in CSS pixels.
+     * @param {number} [height] - The height of screen space. Defaults to the height of the canvas
+     * element in CSS pixels.
      * @returns {Vec3} The screen space coordinate.
+     * @example
+     * // The pixel position of a point in the texture of a camera that renders into a render target
+     * const { width, height } = entity.camera.renderTarget;
+     * const pixel = entity.camera.worldToScreen(point, undefined, width, height);
      */
-    worldToScreen(worldCoord, screenCoord) {
-        const device = this.system.app.graphicsDevice;
-        const { width, height } = device.clientRect;
-        return this._camera.worldToScreen(worldCoord, width, height, screenCoord);
+    worldToScreen(worldCoord, screenCoord, width, height) {
+        const { clientRect } = this.system.app.graphicsDevice;
+        return this._camera.worldToScreen(worldCoord, width ?? clientRect.width, height ?? clientRect.height, screenCoord);
     }
 
     /**
@@ -1164,10 +1458,12 @@ class CameraComponent extends Component {
      */
     onLayersChanged(oldComp, newComp) {
         this.addCameraToLayers();
-        oldComp.off('add', this.onLayerAdded, this);
-        oldComp.off('remove', this.onLayerRemoved, this);
-        newComp.on('add', this.onLayerAdded, this);
-        newComp.on('remove', this.onLayerRemoved, this);
+
+        // store the new handles, so that onDisable can unsubscribe from the current composition
+        this._evtLayerAdded?.off();
+        this._evtLayerAdded = newComp.on('add', this.onLayerAdded, this);
+        this._evtLayerRemoved?.off();
+        this._evtLayerRemoved = newComp.on('remove', this.onLayerRemoved, this);
     }
 
     /**
@@ -1235,7 +1531,7 @@ class CameraComponent extends Component {
         this.system.removeCamera(this);
     }
 
-    onRemove() {
+    onBeforeRemove() {
         this.onDisable();
         this.off();
 
@@ -1255,20 +1551,6 @@ class CameraComponent extends Component {
      */
     calculateAspectRatio(rt) {
         return this._camera.calculateAspectRatio(rt);
-    }
-
-    /**
-     * Prepare the camera for frame rendering.
-     *
-     * @param {RenderTarget|null} [rt] - Render
-     * target to which rendering will be performed. Will affect camera's aspect ratio, if
-     * aspectRatioMode is {@link ASPECT_AUTO}.
-     * @ignore
-     */
-    frameUpdate(rt) {
-        if (this.aspectRatioMode === ASPECT_AUTO) {
-            this.aspectRatio = this.calculateAspectRatio(rt);
-        }
     }
 
     /**
@@ -1304,6 +1586,9 @@ class CameraComponent extends Component {
      * used for getting access to additional WebXR spec extensions.
      * @param {boolean} [options.imageTracking] - Set to true to attempt to enable {@link XrImageTracking}.
      * @param {boolean} [options.planeDetection] - Set to true to attempt to enable {@link XrPlaneDetection}.
+     * @param {boolean} [options.meshDetection] - Set to true to attempt to enable {@link XrMeshDetection}.
+     * @param {boolean} [options.cameraColor] - Set to true to attempt to enable camera color
+     * access, see {@link XrViews#availableColor}.
      * @param {XrErrorCallback} [options.callback] - Optional callback function called once the
      * session is started. The callback has one argument Error - it is null if the XR session
      * started successfully.
@@ -1320,7 +1605,7 @@ class CameraComponent extends Component {
      * depth sensing system.
      * @example
      * // On an entity with a camera component
-     * this.entity.camera.startXr(pc.XRTYPE_VR, pc.XRSPACE_LOCAL, {
+     * this.entity.camera.startXr(XRTYPE_VR, XRSPACE_LOCAL, {
      *     callback: (err) => {
      *         if (err) {
      *             // failed to start XR session
@@ -1346,12 +1631,13 @@ class CameraComponent extends Component {
      * });
      */
     endXr(callback) {
-        if (!this._camera.xr) {
+        const xr = this.system.app.xr;
+        if (xr?.camera !== this.entity) {
             if (callback) callback(new Error('Camera is not in XR'));
             return;
         }
 
-        this._camera.xr.end(callback);
+        xr.end(callback);
     }
 
     /**
@@ -1368,6 +1654,8 @@ class CameraComponent extends Component {
         this.calculateProjection = source.calculateProjection;
         this.calculateTransform = source.calculateTransform;
         this.clearColor = source.clearColor;
+        this._camera._clearColors = null;
+        source._camera._clearColors?.forEach((color, index) => this.setClearColor(index, color));
         this.clearColorBuffer = source.clearColorBuffer;
         this.clearDepthBuffer = source.clearDepthBuffer;
         this.clearStencilBuffer = source.clearStencilBuffer;
@@ -1383,6 +1671,7 @@ class CameraComponent extends Component {
         this.orthoHeight = source.orthoHeight;
         this.priority = source.priority;
         this.projection = source.projection;
+        this.projectionOffset = source.projectionOffset;
         this.rect = source.rect;
         this.renderTarget = source.renderTarget;
         this.scissorRect = source.scissorRect;

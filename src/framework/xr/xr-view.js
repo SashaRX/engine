@@ -1,11 +1,10 @@
-import { EventHandler } from '../../core/event-handler.js';
+import { RenderView } from '../../scene/render-view.js';
 import { Texture } from '../../platform/graphics/texture.js';
-import { Vec4 } from '../../core/math/vec4.js';
-import { Mat3 } from '../../core/math/mat3.js';
 import { Mat4 } from '../../core/math/mat4.js';
-import { ADDRESS_CLAMP_TO_EDGE, FILTER_LINEAR, FILTER_NEAREST, PIXELFORMAT_R32F, PIXELFORMAT_DEPTH, PIXELFORMAT_RGB8 } from '../../platform/graphics/constants.js';
+import { ADDRESS_CLAMP_TO_EDGE, FILTER_LINEAR, FILTER_NEAREST, PIXELFORMAT_RGB8, PIXELFORMAT_R32F } from '../../platform/graphics/constants.js';
 
 /**
+ * @import { EventHandle } from '../../core/event-handle.js'
  * @import { XrManager } from './xr-manager.js'
  */
 
@@ -16,7 +15,7 @@ import { ADDRESS_CLAMP_TO_EDGE, FILTER_LINEAR, FILTER_NEAREST, PIXELFORMAT_R32F,
  *
  * @category XR
  */
-class XrView extends EventHandler {
+class XrView extends RenderView {
     /**
      * Fired when the depth sensing texture has been resized. The {@link depthUvMatrix} needs
      * to be updated for relevant shaders. The handler is passed the new width and height of the
@@ -43,36 +42,6 @@ class XrView extends EventHandler {
     _xrView;
 
     /**
-     * @type {Float32Array}
-     * @private
-     */
-    _positionData = new Float32Array(3);
-
-    /** @private */
-    _viewport = new Vec4();
-
-    /** @private */
-    _projMat = new Mat4();
-
-    /** @private */
-    _projViewOffMat = new Mat4();
-
-    /** @private */
-    _viewMat = new Mat4();
-
-    /** @private */
-    _viewOffMat = new Mat4();
-
-    /** @private */
-    _viewMat3 = new Mat3();
-
-    /** @private */
-    _viewInvMat = new Mat4();
-
-    /** @private */
-    _viewInvOffMat = new Mat4();
-
-    /**
      * @type {XRCamera}
      * @private
      */
@@ -95,6 +64,12 @@ class XrView extends EventHandler {
      * @private
      */
     _depthInfo = null;
+
+    /**
+     * @type {EventHandle|null}
+     * @private
+     */
+    _evtDeviceLost = null;
 
     /**
      * @type {Uint8Array}
@@ -164,7 +139,7 @@ class XrView extends EventHandler {
         }
 
         if (this._textureColor || this._textureDepth) {
-            device.on('devicelost', this._onDeviceLost, this);
+            this._evtDeviceLost = device.on('devicelost', this._onDeviceLost, this);
         }
     }
 
@@ -183,7 +158,7 @@ class XrView extends EventHandler {
      * AR system. This texture can be used (not limited to) for reconstructing real world
      * geometry, virtual object placement, occlusion of virtual object by the real world geometry,
      * and more.
-     * The format of this texture is any of {@link PIXELFORMAT_LA8}, {@link PIXELFORMAT_DEPTH}, or
+     * The format of this texture is any of `PIXELFORMAT_LA8`, {@link PIXELFORMAT_DEPTH}, or
      * {@link PIXELFORMAT_R32F} based on {@link XrViews#depthPixelFormat}. It is UV transformed
      * based on the underlying AR system which can be normalized using {@link depthUvMatrix}.
      * Equals to null if camera depth is not supported.
@@ -250,7 +225,7 @@ class XrView extends EventHandler {
     /**
      * An eye with which this view is associated. Can be any of:
      *
-     * - {@link XREYE_NONE}: None - inidcates a monoscopic view (likely mobile phone screen).
+     * - {@link XREYE_NONE}: None - indicates a monoscopic view (likely mobile phone screen).
      * - {@link XREYE_LEFT}: Left - indicates left eye view.
      * - {@link XREYE_RIGHT}: Right - indicates a right eye view.
      *
@@ -258,65 +233,6 @@ class XrView extends EventHandler {
      */
     get eye() {
         return this._xrView.eye;
-    }
-
-    /**
-     * A Vec4 (x, y, width, height) that represents a view's viewport. For a monoscopic screen,
-     * it will define fullscreen view. But for stereoscopic views (left/right eye), it will define
-     * a part of a whole screen that view is occupying.
-     *
-     * @type {Vec4}
-     */
-    get viewport() {
-        return this._viewport;
-    }
-
-    /**
-     * @type {Mat4}
-     * @ignore
-     */
-    get projMat() {
-        return this._projMat;
-    }
-
-    /**
-     * @type {Mat4}
-     * @ignore
-     */
-    get projViewOffMat() {
-        return this._projViewOffMat;
-    }
-
-    /**
-     * @type {Mat4}
-     * @ignore
-     */
-    get viewOffMat() {
-        return this._viewOffMat;
-    }
-
-    /**
-     * @type {Mat4}
-     * @ignore
-     */
-    get viewInvOffMat() {
-        return this._viewInvOffMat;
-    }
-
-    /**
-     * @type {Mat3}
-     * @ignore
-     */
-    get viewMat3() {
-        return this._viewMat3;
-    }
-
-    /**
-     * @type {Float32Array}
-     * @ignore
-     */
-    get positionData() {
-        return this._positionData;
     }
 
     /**
@@ -330,19 +246,17 @@ class XrView extends EventHandler {
             this._xrCamera = this._xrView.camera;
         }
 
-        const layer = frame.session.renderState.baseLayer;
-
         // viewport
-        const viewport = layer.getViewport(this._xrView);
-        this._viewport.x = viewport.x;
-        this._viewport.y = viewport.y;
-        this._viewport.z = viewport.width;
-        this._viewport.w = viewport.height;
+        const viewport = this._manager.xrBridge.getViewport(frame, this._xrView);
+        this.setViewport(viewport.x, viewport.y, viewport.width, viewport.height);
 
-        // matrices
-        this._projMat.set(this._xrView.projectionMatrix);
-        this._viewMat.set(this._xrView.transform.inverse.matrix);
-        this._viewInvMat.set(this._xrView.transform.matrix);
+        // matrices: WebXR provides both the view-to-world (transform.matrix) and world-to-view
+        // (transform.inverse.matrix) matrices, so both are passed to avoid recomputing the inverse
+        this.setView(
+            this._xrView.projectionMatrix,
+            this._xrView.transform.matrix,
+            this._xrView.transform.inverse.matrix
+        );
 
         this._updateTextureColor();
         this._updateDepth(frame);
@@ -354,57 +268,7 @@ class XrView extends EventHandler {
             return;
         }
 
-        const binding = this._manager.webglBinding;
-        if (!binding) {
-            return;
-        }
-
-        const texture = binding.getCameraImage(this._xrCamera);
-        if (!texture) {
-            return;
-        }
-
-        const device = this._manager.app.graphicsDevice;
-        const gl = device.gl;
-
-        if (!this._frameBufferSource) {
-            // create frame buffer to read from
-            this._frameBufferSource = gl.createFramebuffer();
-
-            // create frame buffer to write to
-            this._frameBuffer = gl.createFramebuffer();
-        } else {
-            const attachmentBaseConstant = gl.COLOR_ATTACHMENT0;
-            const width = this._xrCamera.width;
-            const height = this._xrCamera.height;
-
-            // set frame buffer to read from
-            device.setFramebuffer(this._frameBufferSource);
-            gl.framebufferTexture2D(
-                gl.FRAMEBUFFER,
-                attachmentBaseConstant,
-                gl.TEXTURE_2D,
-                texture,
-                0
-            );
-
-            // set frame buffer to write to
-            device.setFramebuffer(this._frameBuffer);
-            gl.framebufferTexture2D(
-                gl.FRAMEBUFFER,
-                attachmentBaseConstant,
-                gl.TEXTURE_2D,
-                this._textureColor.impl._glTexture,
-                0
-            );
-
-            // bind buffers
-            gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._frameBufferSource);
-            gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._frameBuffer);
-
-            // copy buffers with flip Y
-            gl.blitFramebuffer(0, height, width, 0, 0, 0, width, height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
-        }
+        this._manager.xrBridge?.syncCameraColorTexture(this._xrCamera, this._textureColor);
     }
 
     /**
@@ -418,7 +282,7 @@ class XrView extends EventHandler {
 
         const gpu = this._manager.views.depthGpuOptimized;
 
-        const infoSource = gpu ? this._manager.webglBinding : frame;
+        const infoSource = gpu ? this._manager.graphicsBinding : frame;
         if (!infoSource) {
             this._depthInfo = null;
             return;
@@ -458,33 +322,11 @@ class XrView extends EventHandler {
         // update texture
         if (this._depthInfo) {
             if (gpu) {
-                // gpu
-                if (this._depthInfo.texture) {
-                    const gl = this._manager.app.graphicsDevice.gl;
-
-                    this._textureDepth.impl._glTexture = this._depthInfo.texture;
-
-                    if (this._depthInfo.textureType === 'texture-array') {
-                        this._textureDepth.impl._glTarget = gl.TEXTURE_2D_ARRAY;
-                    } else {
-                        this._textureDepth.impl._glTarget = gl.TEXTURE_2D;
-                    }
-
-                    switch (this._manager.views.depthPixelFormat) {
-                        case PIXELFORMAT_R32F:
-                            this._textureDepth.impl._glInternalFormat = gl.R32F;
-                            this._textureDepth.impl._glPixelType = gl.FLOAT;
-                            this._textureDepth.impl._glFormat = gl.RED;
-                            break;
-                        case PIXELFORMAT_DEPTH:
-                            this._textureDepth.impl._glInternalFormat = gl.DEPTH_COMPONENT16;
-                            this._textureDepth.impl._glPixelType = gl.UNSIGNED_SHORT;
-                            this._textureDepth.impl._glFormat = gl.DEPTH_COMPONENT;
-                            break;
-                    }
-
-                    this._textureDepth.impl._glCreated = true;
-                }
+                this._manager.xrBridge?.syncCameraDepthTexture(
+                    this._depthInfo,
+                    this._textureDepth,
+                    this._manager.views.depthPixelFormat ?? PIXELFORMAT_R32F
+                );
             } else {
                 // cpu
                 this._textureDepth._levels[0] = new Uint8Array(this._depthInfo.data);
@@ -499,30 +341,7 @@ class XrView extends EventHandler {
         if (resized) this.fire('depth:resize', width, height);
     }
 
-    /**
-     * @param {Mat4|null} transform - World Transform of a parents GraphNode.
-     * @ignore
-     */
-    updateTransforms(transform) {
-        if (transform) {
-            this._viewInvOffMat.mul2(transform, this._viewInvMat);
-            this.viewOffMat.copy(this._viewInvOffMat).invert();
-        } else {
-            this._viewInvOffMat.copy(this._viewInvMat);
-            this.viewOffMat.copy(this._viewMat);
-        }
-
-        this._viewMat3.setFromMat4(this._viewOffMat);
-        this._projViewOffMat.mul2(this._projMat, this._viewOffMat);
-
-        this._positionData[0] = this._viewInvOffMat.data[12];
-        this._positionData[1] = this._viewInvOffMat.data[13];
-        this._positionData[2] = this._viewInvOffMat.data[14];
-    }
-
     _onDeviceLost() {
-        this._frameBufferSource = null;
-        this._frameBuffer = null;
         this._depthInfo = null;
     }
 
@@ -554,6 +373,10 @@ class XrView extends EventHandler {
     destroy() {
         this._depthInfo = null;
 
+        // the graphics device outlives the view, which its listener would otherwise keep alive
+        this._evtDeviceLost?.off();
+        this._evtDeviceLost = null;
+
         if (this._textureColor) {
             this._textureColor.destroy();
             this._textureColor = null;
@@ -562,16 +385,6 @@ class XrView extends EventHandler {
         if (this._textureDepth) {
             this._textureDepth.destroy();
             this._textureDepth = null;
-        }
-
-        if (this._frameBufferSource) {
-            const gl = this._manager.app.graphicsDevice.gl;
-
-            gl.deleteFramebuffer(this._frameBufferSource);
-            this._frameBufferSource = null;
-
-            gl.deleteFramebuffer(this._frameBuffer);
-            this._frameBuffer = null;
         }
     }
 }

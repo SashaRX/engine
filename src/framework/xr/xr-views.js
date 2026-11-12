@@ -68,7 +68,7 @@ class XrViews extends EventHandler {
      * @type {boolean}
      * @private
      */
-    _supportedColor = platform.browser && !!window.XRCamera && !!window.XRWebGLBinding;
+    _supportedColor = false;
 
     /**
      * @type {boolean}
@@ -108,6 +108,16 @@ class XrViews extends EventHandler {
         super();
 
         this._manager = manager;
+
+        const gd = manager.app?.graphicsDevice;
+        if (platform.browser && !!window.XRCamera) {
+            if (gd?.isWebGL2 && !!window.XRWebGLBinding) {
+                this._supportedColor = true;
+            } else if (gd?.isWebGPU && !!window.XRGPUBinding) {
+                this._supportedColor = true;
+            }
+        }
+
         this._manager.on('start', this._onSessionStart, this);
         this._manager.on('end', this._onSessionEnd, this);
     }
@@ -191,7 +201,7 @@ class XrViews extends EventHandler {
     /**
      * The depth sensing pixel format. Can be:
      *
-     * - {@link PIXELFORMAT_LA8}
+     * - `PIXELFORMAT_LA8`
      * - {@link PIXELFORMAT_R32F}
      *
      * @type {PIXELFORMAT_LA8|PIXELFORMAT_R32F|null}
@@ -202,7 +212,7 @@ class XrViews extends EventHandler {
 
     /**
      * @param {XRFrame} frame - XRFrame from requestAnimationFrame callback.
-     * @param {XRView} xrView - XRView from WebXR API.
+     * @param {XRView[]} xrViews - XRViews from the WebXR API.
      * @ignore
      */
     update(frame, xrViews) {
