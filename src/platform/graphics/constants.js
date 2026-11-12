@@ -399,7 +399,9 @@ export const DEPTHRESOLVE_SAMPLE0 = 'sample0';
 /**
  * The depth value of the multisampled depth buffer is resolved by taking the minimum value of all
  * samples - with a standard depth buffer this selects the nearest surface, which is a conservative
- * and stable choice for depth-consuming effects. This is the default. See
+ * and stable choice for depth-consuming effects. This is the default. The value is the minimum in
+ * the standard depth convention, so with reverse-z (see {@link GraphicsDevice#isReverseZ}) it still
+ * selects the nearest surface, the maximum of the stored values. See
  * {@link RenderTarget#depthResolveMode}.
  *
  * @category Graphics
@@ -408,8 +410,10 @@ export const DEPTHRESOLVE_MIN = 'min';
 
 /**
  * The depth value of the multisampled depth buffer is resolved by taking the maximum value of all
- * samples - with a standard depth buffer this selects the farthest surface. See
- * {@link RenderTarget#depthResolveMode}.
+ * samples - with a standard depth buffer this selects the farthest surface. The value is the
+ * maximum in the standard depth convention, so with reverse-z (see
+ * {@link GraphicsDevice#isReverseZ}) it still selects the farthest surface, the minimum of the
+ * stored values. See {@link RenderTarget#depthResolveMode}.
  *
  * @category Graphics
  */

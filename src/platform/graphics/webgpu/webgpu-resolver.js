@@ -117,6 +117,25 @@ class WebgpuResolver {
     }
 
     /**
+     * Returns the reduction of the samples that implements a depth resolve mode. The modes are
+     * defined in the standard depth convention, where {@link DEPTHRESOLVE_MIN} selects the nearest
+     * surface. With reverse-z the nearest surface has the largest depth value, so the minimum and
+     * the maximum swap.
+     *
+     * @param {string} mode - The depth resolve mode (DEPTHRESOLVE_***).
+     * @param {boolean} reverseZ - True if the depth buffer uses reverse-z.
+     * @returns {string} The resolve mode the shader reduces the samples with.
+     * @ignore
+     */
+    static getReduction(mode, reverseZ) {
+        if (reverseZ) {
+            if (mode === DEPTHRESOLVE_MIN) return DEPTHRESOLVE_MAX;
+            if (mode === DEPTHRESOLVE_MAX) return DEPTHRESOLVE_MIN;
+        }
+        return mode;
+    }
+
+    /**
      * @param {GPUCommandEncoder} commandEncoder - Command encoder to use for the resolve.
      * @param {GPUTexture} sourceTexture - Source multi-sampled depth texture to resolve.
      * @param {GPUTexture} destinationTexture - Destination depth texture to resolve to.
@@ -138,8 +157,8 @@ class WebgpuResolver {
 
         WebgpuDebug.validate(device);
 
-        // pipeline depends on the format and the resolve mode
-        const pipeline = this.getPipeline(destinationTexture.format, mode);
+        // pipeline depends on the format and the reduction the resolve mode needs on this device
+        const pipeline = this.getPipeline(destinationTexture.format, WebgpuResolver.getReduction(mode, device.isReverseZ));
 
         DebugGraphics.pushGpuMarker(device, 'DEPTH_RESOLVE-RENDERER');
 

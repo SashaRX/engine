@@ -246,6 +246,9 @@ class RenderTarget {
      * - {@link DEPTHRESOLVE_MAX}: the maximum sample value - the farthest surface.
      * - {@link DEPTHRESOLVE_SAMPLE0}: the value of the sample at index 0.
      *
+     * The minimum and maximum are in the standard depth convention: with reverse-z (see
+     * {@link GraphicsDevice#isReverseZ}) they still select the nearest and the farthest surface.
+     *
      * Defaults to {@link DEPTHRESOLVE_MIN}. Ignored on WebGL2, where the sample selection of the
      * depth resolve is defined by the implementation. Can also be changed at any time using the
      * {@link RenderTarget#depthResolveMode} property.
