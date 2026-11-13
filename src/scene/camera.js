@@ -445,7 +445,7 @@ class Camera {
         if (this.calculateProjection) {
             this.calculateProjection(projMat, VIEW_CENTER);
         }
-        Camera.applyShaderProjectionTransform(projMat, _publishProjMat, flipY, this.device.isWebGPU);
+        Camera.applyShaderProjectionTransform(projMat, _publishProjMat, flipY, this.device.isWebGPU, this.reverseZActive);
 
         if (this.calculateTransform) {
             this.calculateTransform(_publishViewInvMat, VIEW_CENTER);
