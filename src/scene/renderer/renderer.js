@@ -13,14 +13,17 @@ import {
     CULLFACE_NONE,
     BINDGROUP_MESH_UB, BINDGROUP_MATERIAL,
     FRONTFACE_CCW,
-    FRONTFACE_CW
+    FRONTFACE_CW,
+    FUNC_NEVER, FUNC_LESS, FUNC_EQUAL, FUNC_LESSEQUAL, FUNC_GREATER, FUNC_NOTEQUAL, FUNC_GREATEREQUAL, FUNC_ALWAYS
 } from '../../platform/graphics/constants.js';
 import { DebugGraphics } from '../../platform/graphics/debug-graphics.js';
+import { DepthState } from '../../platform/graphics/depth-state.js';
 import { UniformBuffer } from '../../platform/graphics/uniform-buffer.js';
 import { BindGroup, DynamicBindGroup } from '../../platform/graphics/bind-group.js';
 import { UniformFormat, UniformBufferFormat } from '../../platform/graphics/uniform-buffer-format.js';
 import {
-    VIEW_CENTER, LIGHTTYPE_DIRECTIONAL, MASK_AFFECT_DYNAMIC, MASK_AFFECT_LIGHTMAPPED, MASK_BAKE
+    VIEW_CENTER, LIGHTTYPE_DIRECTIONAL, MASK_AFFECT_DYNAMIC, MASK_AFFECT_LIGHTMAPPED, MASK_BAKE,
+    PROJECTION_PERSPECTIVE
 } from '../constants.js';
 import { LightCube } from '../graphics/light-cube.js';
 import { getBlueNoiseTexture } from '../graphics/noise-textures.js';
@@ -94,6 +97,31 @@ const _tempProjMat0 = new Mat4();
 const _tempProjMat1 = new Mat4();
 const _tempProjMat4 = new Mat4();
 const _tempProjMat5 = new Mat4();
+const _tempViewProjMat = new Mat4();
+
+// the depth test functions of reverse-z, indexed by the function they replace: reverse-z reverses
+// the order of the depths, so that a nearer fragment has the greater depth
+const _reverseZFunc = [];
+_reverseZFunc[FUNC_NEVER] = FUNC_NEVER;
+_reverseZFunc[FUNC_LESS] = FUNC_GREATER;
+_reverseZFunc[FUNC_EQUAL] = FUNC_EQUAL;
+_reverseZFunc[FUNC_LESSEQUAL] = FUNC_GREATEREQUAL;
+_reverseZFunc[FUNC_GREATER] = FUNC_LESS;
+_reverseZFunc[FUNC_NOTEQUAL] = FUNC_NOTEQUAL;
+_reverseZFunc[FUNC_GREATEREQUAL] = FUNC_LESSEQUAL;
+_reverseZFunc[FUNC_ALWAYS] = FUNC_ALWAYS;
+
+// Reverses back the clip depth of a view projection rendering with reverse-z (see
+// Camera#reverseZ), which maps the clip depth z to w - z, and so does again when applied twice.
+const reverseClipDepth = (matrix, out) => {
+    out.copy(matrix);
+    const d = out.data;
+    d[2] = d[3] - d[2];
+    d[6] = d[7] - d[6];
+    d[10] = d[11] - d[10];
+    d[14] = d[15] - d[14];
+    return out;
+};
 const _tempSet = new Set();
 
 const _tempMeshInstances = [];
@@ -157,8 +185,14 @@ class ViewUniformBuffer {
  * @ignore
  */
 class Renderer {
-    /** @type {boolean} */
-    clustersDebugRendered = false;
+    /**
+     * The depth states the draws of the cameras rendering with reverse-z use, keyed by the key of
+     * the depth state each one reverses. See {@link Renderer#getReverseZDepthState}.
+     *
+     * @type {Map<number, DepthState>}
+     * @private
+     */
+    _reverseZDepthStates = new Map();
 
     /** @type {Scene} */
     scene;
@@ -523,8 +557,19 @@ class Renderer {
             let projMatSkybox = camera.getProjectionMatrixSkybox();
 
             const webgpu = this.device.isWebGPU;
-            projMat = Camera.applyShaderProjectionTransform(projMat, _tempProjMat0, flipY, webgpu);
-            projMatSkybox = Camera.applyShaderProjectionTransform(projMatSkybox, _tempProjMat1, flipY, webgpu);
+            const reverseZ = camera.reverseZActive;
+            projMat = Camera.applyShaderProjectionTransform(projMat, _tempProjMat0, flipY, webgpu, reverseZ);
+            projMatSkybox = Camera.applyShaderProjectionTransform(projMatSkybox, _tempProjMat1, flipY, webgpu, reverseZ);
+
+            // the reversed depth computed from the clip planes, which keeps the far plane in place
+            // with a small near clip and a large far clip. A projection the application calculates
+            // keeps the reversed depth of its own terms. The skybox projection is perspective for
+            // both projections of the camera.
+            if (reverseZ && !camera.calculateProjection) {
+                const { nearClip, farClip } = camera;
+                Camera.setReverseZDepth(projMat, camera.projection === PROJECTION_PERSPECTIVE, nearClip, farClip);
+                Camera.setReverseZDepth(projMatSkybox, true, nearClip, farClip);
+            }
 
             // camera jitter
             const { jitter } = camera;
@@ -589,7 +634,9 @@ class Renderer {
             // View Position (world space)
             this.dispatchViewPos(camera._node.getPosition());
 
-            camera.frustum.setFromMat4(viewProjMat);
+            // with reverse-z, from the view projection with the standard depth, so that the frustum
+            // planes are those of a camera rendering without it
+            camera.frustum.setFromMat4(reverseZ ? reverseClipDepth(viewProjMat, _tempViewProjMat) : viewProjMat);
         }
 
         // set for all passes including XR, to keep the uniform fresh per render pass - it is
@@ -669,13 +716,34 @@ class Renderer {
             _tempClearColor[1] = c.g;
             _tempClearColor[2] = c.b;
             _tempClearColor[3] = c.a;
-            _tempClearOptions.depth = camera._clearDepth;
+            _tempClearOptions.depth = camera.reverseZActive ? 1 - camera._clearDepth : camera._clearDepth;
             _tempClearOptions.stencil = camera._clearStencil;
             _tempClearOptions.flags = flags;
             device.clear(_tempClearOptions);
 
             DebugGraphics.popGpuMarker(device);
         }
+    }
+
+    /**
+     * Returns the depth state a draw of a camera rendering with reverse-z (see
+     * {@link Camera#reverseZActive}) uses in place of the given one. The depth test function is reversed,
+     * so that it keeps passing the nearer or the farther fragments as it does without reverse-z, and
+     * so are the depth biases, so that they keep moving the depth towards or away from the camera.
+     * The depth states are created once, and shared by all the cameras rendering with reverse-z.
+     *
+     * @param {DepthState} depthState - The depth state of the draw.
+     * @returns {DepthState} The depth state the draw uses with reverse-z.
+     */
+    getReverseZDepthState(depthState) {
+        let reversed = this._reverseZDepthStates.get(depthState.key);
+        if (!reversed) {
+            reversed = new DepthState(_reverseZFunc[depthState.func], depthState.write);
+            reversed.depthBias = -depthState.depthBias;
+            reversed.depthBiasSlope = -depthState.depthBiasSlope;
+            this._reverseZDepthStates.set(depthState.key, reversed);
+        }
+        return reversed;
     }
 
     setupCullModeAndFrontFace(cullFaces, flipFactor, drawCall) {
@@ -703,9 +771,7 @@ class Renderer {
         const drawCallsCount = drawCalls.length;
         if (drawCallsCount === 0) return;
 
-        // #if _PROFILER
         const skinTime = now();
-        // #endif
 
         for (let i = 0; i < drawCallsCount; i++) {
             const si = drawCalls[i].skinInstance;
@@ -715,9 +781,7 @@ class Renderer {
             }
         }
 
-        // #if _PROFILER
         this._skinTime += now() - skinTime;
-        // #endif
     }
 
     /**
@@ -727,9 +791,7 @@ class Renderer {
      * @ignore
      */
     updateGpuSkinMatrices(drawCalls) {
-        // #if _PROFILER
         const skinTime = now();
-        // #endif
 
         const renderVersion = this.device.renderVersion;
         for (const drawCall of drawCalls) {
@@ -747,9 +809,7 @@ class Renderer {
             }
         }
 
-        // #if _PROFILER
         this._skinTime += now() - skinTime;
-        // #endif
     }
 
     /**
@@ -759,9 +819,7 @@ class Renderer {
      * @ignore
      */
     updateMorphing(drawCalls) {
-        // #if _PROFILER
         const morphTime = now();
-        // #endif
 
         const renderVersion = this.device.renderVersion;
         for (const drawCall of drawCalls) {
@@ -775,9 +833,7 @@ class Renderer {
             }
         }
 
-        // #if _PROFILER
         this._morphTime += now() - morphTime;
-        // #endif
     }
 
     /**
@@ -1302,13 +1358,8 @@ class Renderer {
 
         // stats
         const stats = this.scene._stats;
-
-        // #if _PROFILER
-
         stats.dynamicLights = 0;
         stats.bakedLights = 0;
-
-        // #endif
 
         const count = comp.layerList.length;
         for (let i = 0; i < count; i++) {
@@ -1332,8 +1383,6 @@ class Renderer {
                             this.localLights.push(light);
                         }
 
-                        // #if _PROFILER
-
                         // if affects dynamic or baked objects in real-time
                         if ((light.mask & MASK_AFFECT_DYNAMIC) || (light.mask & MASK_AFFECT_LIGHTMAPPED)) {
                             stats.dynamicLights++;
@@ -1343,8 +1392,6 @@ class Renderer {
                         if (light.mask & MASK_BAKE) {
                             stats.bakedLights++;
                         }
-
-                        // #endif
                     }
                 }
             }
@@ -1432,9 +1479,7 @@ class Renderer {
             }
         }
 
-        // #if _PROFILER
         scene._stats.meshInstances = totalMeshInstances;
-        // #endif
 
         // update shaders if needed
         if (updateShaders) {
@@ -1466,9 +1511,7 @@ class Renderer {
      */
     updateLayerComposition(comp) {
 
-        // #if _PROFILER
         const layerCompositionUpdateTime = now();
-        // #endif
 
         const len = comp.layerList.length;
         const scene = this.scene;
@@ -1476,24 +1519,18 @@ class Renderer {
         for (let i = 0; i < len; i++) {
             const layer = comp.layerList[i];
             layer._shaderVersion = shaderVersion;
-            // #if _PROFILER
             layer._forwardDrawCalls = 0;
             layer._shadowDrawCalls = 0;
             layer._renderTime = 0;
-            // #endif
         }
 
         // update composition
         comp._update();
 
-        // #if _PROFILER
         this._layerCompositionUpdateTime += now() - layerCompositionUpdateTime;
-        // #endif
     }
 
     frameUpdate() {
-
-        this.clustersDebugRendered = false;
 
         // no valid shadows at the start of the frame
         this.culler.dirLightShadows.clear();
