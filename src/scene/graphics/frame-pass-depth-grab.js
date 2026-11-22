@@ -26,15 +26,20 @@ class FramePassDepthGrab extends FramePass {
     }
 
     /**
-     * Format of the texture the grab copies into. A supplied depth texture keeps its format, so a
-     * later blit stays inside one internal format. An automatic depth buffer is 32-bit float, or
-     * 24-bit depth with stencil when the target has a stencil.
+     * Format of the texture the grab copies into. A supplied depth texture keeps its format for
+     * single-sampled targets, while WebGL2 MSAA targets use the actual MSAA depth format. An
+     * automatic depth buffer is 32-bit float, or 24-bit depth with stencil when the target has a
+     * stencil.
      *
      * @param {import('../../platform/graphics/render-target.js').RenderTarget} destinationRt - The
      * camera target the depth is copied from.
      * @returns {number} The pixel format of the grab texture.
      */
     depthFormat(destinationRt) {
+        if (this.device.isWebGL2 && destinationRt.samples > 1) {
+            return destinationRt.stencil ? PIXELFORMAT_DEPTHSTENCIL : PIXELFORMAT_DEPTH;
+        }
+
         const format = destinationRt.depthBuffer?.format;
         if (format === PIXELFORMAT_DEPTH || format === PIXELFORMAT_DEPTH16 || format === PIXELFORMAT_DEPTHSTENCIL) {
             return format;
