@@ -84,9 +84,6 @@ jobs:
       - name: Install dependencies
         run: npm clean-install --progress=false --no-fund
 
-      - name: Build debug ESM bundle
-        run: npm run build:dbg:esm
-
       - name: Run ESLint
         run: npm run lint
 

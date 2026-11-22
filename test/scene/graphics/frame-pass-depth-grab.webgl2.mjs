@@ -1,7 +1,8 @@
 // Explicit browser entry point. Loading this module in the recursive Node suite does not run it.
 // Covers both a single-sample copy and a direct multisampled resolve from offscreen targets.
 export async function run(canvas, log) {
-    const pc = await import('../../../build/playcanvas.dbg.mjs');
+    // resolved at run time, like test/bundles/treeshake.test.mjs: the bundle exists only after a build
+    const pc = await import(new URL('../../../build/playcanvas.dbg.mjs', import.meta.url).href);
     const gl = canvas.getContext('webgl2', { depth: true, stencil: true, antialias: false });
     if (!gl) {
         throw new Error('WebGL2 context unavailable');

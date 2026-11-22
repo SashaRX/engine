@@ -209,15 +209,7 @@ class WebglRenderTarget {
                 }
             }
 
-            // a framebuffer with no color attachment is incomplete while its draw or read buffer
-            // still names COLOR_ATTACHMENT0. Depth-only targets (shadows, the scene depth grab)
-            // have to name NONE.
-            if (buffers.length > 0) {
-                gl.drawBuffers(buffers);
-            } else {
-                gl.drawBuffers([gl.NONE]);
-                gl.readBuffer(gl.NONE);
-            }
+            gl.drawBuffers(buffers);
 
             const depthBuffer = target._depthBuffer;
             if (depthBuffer || target._depth) {
