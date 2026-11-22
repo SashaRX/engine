@@ -1,5 +1,5 @@
 // Explicit browser entry point. Loading this module in the recursive Node suite does not run it.
-// Single-sample WebGL2 only: the multisampled internalResolve path and a backbuffer grab are not covered.
+// Covers both a single-sample copy and a direct multisampled resolve from offscreen targets.
 export async function run(canvas, log) {
     const pc = await import('../../../build/playcanvas.dbg.mjs');
     const gl = canvas.getContext('webgl2', { depth: true, stencil: true, antialias: false });
@@ -56,6 +56,14 @@ export async function run(canvas, log) {
         const autoStencil = target('auto depth-stencil', { depth: true, stencil: true });
         const supplied16 = target('provided DEPTH16', { depthBuffer: texture(pc.PIXELFORMAT_DEPTH16) });
         const supplied24 = target('provided DEPTHSTENCIL', { depthBuffer: texture(pc.PIXELFORMAT_DEPTHSTENCIL) });
+        const msaa16 = target('MSAA with provided DEPTH16', {
+            depthBuffer: texture(pc.PIXELFORMAT_DEPTH16),
+            samples: 4,
+            autoResolve: false
+        });
+        if (msaa16.samples <= 1) {
+            throw new Error('Multisampled render targets unavailable');
+        }
         const diagnostic = target('readback', { depth: false });
 
         const view = new pc.Entity('Camera');
@@ -92,7 +100,10 @@ export async function run(canvas, log) {
         const bytes = new DataView(rgba.buffer);
         const sample = (x, y) => bytes.getFloat32(4 * (y * size + x), true);
 
-        const frames = [autoDepth, supplied24, supplied16, supplied24, autoStencil, autoDepth, autoStencil, autoStencil];
+        const frames = [
+            autoDepth, supplied24, supplied16, msaa16, supplied16, supplied24,
+            autoStencil, autoDepth, autoStencil, autoStencil
+        ];
         for (const [frame, source] of frames.entries()) {
             log(`Frame ${frame + 1}: ${source.name}`);
             // Front face is half a unit nearer than the box center. Vary both depths even on reuse.

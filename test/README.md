@@ -24,11 +24,17 @@ This runs the same tests with the engine's WebGPU device instead of the null dev
 
 Tests obtain their device from `createGraphicsDevice()` in `test/device.mjs`, which returns whichever device the run uses. A test that checks the behavior of one specific device constructs that device directly. Tests that need the GLSL transpilers, which are not available in Node, are excluded from this run.
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:5a4ca8a2014cfe4521ea8a313fa7c6e35c224c87db956d71c736924c097aef75 -->
+
 ## WebGL2 scene depth grab
 
-From the repository root, run `npm ci`, `npm run build:dbg:esm`, then `python3 -m http.server 8000 --bind 127.0.0.1`. In a WebGL2 browser, open [the depth grab test](http://127.0.0.1:8000/test/scene/graphics/frame-pass-depth-grab.webgl2.html). The page renders eight frames, samples the camera's published depth texture, and prints the renderer, expected and sampled depths, and PASS or FAIL. For browser automation, wait for `#result[data-result]` and require its `data-result` attribute to equal `pass`.
+From the repository root, run `npm ci`, `npm run build:dbg:esm`, then `python3 -m http.server 8000 --bind 127.0.0.1`. In a WebGL2 browser, open [the depth grab test](http://127.0.0.1:8000/test/scene/graphics/frame-pass-depth-grab.webgl2.html). The page renders ten frames, samples the camera's published depth texture, and prints the renderer, expected and sampled depths, and PASS or FAIL. For browser automation, wait for `#result[data-result]` and require its `data-result` attribute to equal `pass`.
 
-The module does not run when the Node suite loads it. It covers single-sample copies only: an automatic depth buffer, an automatic depth-stencil buffer, a supplied `PIXELFORMAT_DEPTH16` buffer and a supplied `PIXELFORMAT_DEPTHSTENCIL` buffer. It does not cover a multisampled resolve or a grab from the back buffer.
+The module does not run when the Node suite loads it. It covers single-sample copies from automatic and supplied depth buffers, and an MSAA resolve with a supplied `PIXELFORMAT_DEPTH16` texture and automatic resolve disabled. It does not cover grabs from the back buffer.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ## Code Coverage
 
