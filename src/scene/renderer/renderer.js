@@ -20,7 +20,8 @@ import { UniformBuffer } from '../../platform/graphics/uniform-buffer.js';
 import { BindGroup, DynamicBindGroup } from '../../platform/graphics/bind-group.js';
 import { UniformFormat, UniformBufferFormat } from '../../platform/graphics/uniform-buffer-format.js';
 import {
-    VIEW_CENTER, LIGHTTYPE_DIRECTIONAL, MASK_AFFECT_DYNAMIC, MASK_AFFECT_LIGHTMAPPED, MASK_BAKE
+    VIEW_CENTER, LIGHTTYPE_DIRECTIONAL, MASK_AFFECT_DYNAMIC, MASK_AFFECT_LIGHTMAPPED, MASK_BAKE,
+    PROJECTION_PERSPECTIVE
 } from '../constants.js';
 import { LightCube } from '../graphics/light-cube.js';
 import { getBlueNoiseTexture } from '../graphics/noise-textures.js';
@@ -94,6 +95,7 @@ const _tempProjMat0 = new Mat4();
 const _tempProjMat1 = new Mat4();
 const _tempProjMat4 = new Mat4();
 const _tempProjMat5 = new Mat4();
+const _tempViewProjMat = new Mat4();
 const _tempSet = new Set();
 
 const _tempMeshInstances = [];
@@ -157,9 +159,6 @@ class ViewUniformBuffer {
  * @ignore
  */
 class Renderer {
-    /** @type {boolean} */
-    clustersDebugRendered = false;
-
     /** @type {Scene} */
     scene;
 
@@ -526,6 +525,21 @@ class Renderer {
             projMat = Camera.applyShaderProjectionTransform(projMat, _tempProjMat0, flipY, webgpu);
             projMatSkybox = Camera.applyShaderProjectionTransform(projMatSkybox, _tempProjMat1, flipY, webgpu);
 
+            // reverse-z: the depth of a built-in projection is computed from the clip planes, which
+            // keeps the far plane in place with a small near clip and a large far clip, while a
+            // projection the application calculates is reversed from its own terms. The skybox
+            // projection is always a built-in perspective one.
+            const reverseZ = camera.reverseZActive;
+            if (reverseZ) {
+                const { nearClip, farClip } = camera;
+                if (camera.calculateProjection) {
+                    Camera.reverseClipDepth(projMat, projMat);
+                } else {
+                    Camera.setReverseZDepth(projMat, camera.projection === PROJECTION_PERSPECTIVE, nearClip, farClip);
+                }
+                Camera.setReverseZDepth(projMatSkybox, true, nearClip, farClip);
+            }
+
             // camera jitter
             const { jitter } = camera;
             let jitterX = 0;
@@ -589,7 +603,9 @@ class Renderer {
             // View Position (world space)
             this.dispatchViewPos(camera._node.getPosition());
 
-            camera.frustum.setFromMat4(viewProjMat);
+            // with reverse-z, from the view projection with its depth reversed back to the standard
+            // one, so that the frustum planes are those of a camera rendering without it
+            camera.frustum.setFromMat4(reverseZ ? Camera.reverseClipDepth(viewProjMat, _tempViewProjMat) : viewProjMat);
         }
 
         // set for all passes including XR, to keep the uniform fresh per render pass - it is
@@ -703,9 +719,7 @@ class Renderer {
         const drawCallsCount = drawCalls.length;
         if (drawCallsCount === 0) return;
 
-        // #if _PROFILER
         const skinTime = now();
-        // #endif
 
         for (let i = 0; i < drawCallsCount; i++) {
             const si = drawCalls[i].skinInstance;
@@ -715,9 +729,7 @@ class Renderer {
             }
         }
 
-        // #if _PROFILER
         this._skinTime += now() - skinTime;
-        // #endif
     }
 
     /**
@@ -727,9 +739,7 @@ class Renderer {
      * @ignore
      */
     updateGpuSkinMatrices(drawCalls) {
-        // #if _PROFILER
         const skinTime = now();
-        // #endif
 
         const renderVersion = this.device.renderVersion;
         for (const drawCall of drawCalls) {
@@ -747,9 +757,7 @@ class Renderer {
             }
         }
 
-        // #if _PROFILER
         this._skinTime += now() - skinTime;
-        // #endif
     }
 
     /**
@@ -759,9 +767,7 @@ class Renderer {
      * @ignore
      */
     updateMorphing(drawCalls) {
-        // #if _PROFILER
         const morphTime = now();
-        // #endif
 
         const renderVersion = this.device.renderVersion;
         for (const drawCall of drawCalls) {
@@ -775,9 +781,7 @@ class Renderer {
             }
         }
 
-        // #if _PROFILER
         this._morphTime += now() - morphTime;
-        // #endif
     }
 
     /**
@@ -1302,13 +1306,8 @@ class Renderer {
 
         // stats
         const stats = this.scene._stats;
-
-        // #if _PROFILER
-
         stats.dynamicLights = 0;
         stats.bakedLights = 0;
-
-        // #endif
 
         const count = comp.layerList.length;
         for (let i = 0; i < count; i++) {
@@ -1332,8 +1331,6 @@ class Renderer {
                             this.localLights.push(light);
                         }
 
-                        // #if _PROFILER
-
                         // if affects dynamic or baked objects in real-time
                         if ((light.mask & MASK_AFFECT_DYNAMIC) || (light.mask & MASK_AFFECT_LIGHTMAPPED)) {
                             stats.dynamicLights++;
@@ -1343,8 +1340,6 @@ class Renderer {
                         if (light.mask & MASK_BAKE) {
                             stats.bakedLights++;
                         }
-
-                        // #endif
                     }
                 }
             }
@@ -1432,9 +1427,7 @@ class Renderer {
             }
         }
 
-        // #if _PROFILER
         scene._stats.meshInstances = totalMeshInstances;
-        // #endif
 
         // update shaders if needed
         if (updateShaders) {
@@ -1466,9 +1459,7 @@ class Renderer {
      */
     updateLayerComposition(comp) {
 
-        // #if _PROFILER
         const layerCompositionUpdateTime = now();
-        // #endif
 
         const len = comp.layerList.length;
         const scene = this.scene;
@@ -1476,24 +1467,18 @@ class Renderer {
         for (let i = 0; i < len; i++) {
             const layer = comp.layerList[i];
             layer._shaderVersion = shaderVersion;
-            // #if _PROFILER
             layer._forwardDrawCalls = 0;
             layer._shadowDrawCalls = 0;
             layer._renderTime = 0;
-            // #endif
         }
 
         // update composition
         comp._update();
 
-        // #if _PROFILER
         this._layerCompositionUpdateTime += now() - layerCompositionUpdateTime;
-        // #endif
     }
 
     frameUpdate() {
-
-        this.clustersDebugRendered = false;
 
         // no valid shadows at the start of the frame
         this.culler.dirLightShadows.clear();

@@ -454,6 +454,10 @@ class RenderPassForward extends RenderPass {
         if (this.firstCameraUse) {
             this.scene.fire(EVENT_PRERENDER, this.cameraComponent);
         }
+
+        // the device reverses the depth clears and depth states of a camera rendering with
+        // reverse-z. Read after the prerender handlers, which can still change it.
+        this.reverseZ = this.cameraComponent.camera.reverseZActive;
     }
 
     execute() {
@@ -557,9 +561,7 @@ class RenderPassForward extends RenderPass {
 
         DebugGraphics.pushGpuMarker(this.device, `Camera: ${cameraComponent ? cameraComponent.entity.name : 'Unnamed'}, Layer: ${layer.name}(${transparent ? 'TRANSP' : 'OPAQUE'})`);
 
-        // #if _PROFILER
         const drawTime = now();
-        // #endif
 
         if (cameraComponent) {
 
@@ -629,9 +631,7 @@ class RenderPassForward extends RenderPass {
 
         DebugGraphics.popGpuMarker(this.device);
 
-        // #if _PROFILER
         layer._renderTime += now() - drawTime;
-        // #endif
     }
 
     // #if _DEBUG

@@ -39,6 +39,7 @@ import { UniformBuffer } from './uniform-buffer.js';
  * @import { MeshInstanceStorage } from './mesh-instance-storage.js'
  * @import { RenderTarget } from './render-target.js'
  * @import { Shader } from './shader.js'
+ * @import { ShaderChunkCollection } from './shader-chunk-collection.js'
  * @import { Texture } from './texture.js'
  * @import { DrawCommands } from './draw-commands.js';
  */
@@ -317,6 +318,35 @@ class GraphicsDevice extends EventHandler {
     supportsCompute = false;
 
     /**
+     * The platform chunks added to every GLSL vertex and fragment shader: `vertexHeader`,
+     * `fragmentHeader` and `shared`. Null when the device cannot run GLSL shaders. Each device
+     * implementation imports only its own chunks, so the chunks of other devices can be dropped by
+     * tree-shaking.
+     *
+     * @type {ShaderChunkCollection|null}
+     * @ignore
+     */
+    platformChunksGLSL = null;
+
+    /**
+     * The platform chunks added to every WGSL vertex and fragment shader: `vertexHeader`,
+     * `fragmentHeader`, `shared` and `halfTypes`. Null when the device cannot run WGSL shaders.
+     *
+     * @type {ShaderChunkCollection|null}
+     * @ignore
+     */
+    platformChunksWGSL = null;
+
+    /**
+     * The built-in includes available to every compute shader, keyed by include name. Null when the
+     * device does not support compute shaders.
+     *
+     * @type {ShaderChunkCollection|null}
+     * @ignore
+     */
+    computeChunks = null;
+
+    /**
      * True if the device can read from StorageTexture in the compute shader. By default, the
      * storage texture can be only used with the write operation.
      * When a shader uses this feature, add a `requires` directive to signal non-portability at the
@@ -560,6 +590,15 @@ class GraphicsDevice extends EventHandler {
      * @ignore
      */
     usesMeshBindGroups = false;
+
+    /**
+     * True if the device supports rendering with a reversed depth buffer, see
+     * {@link CameraComponent#reverseZ}. Supported on WebGPU.
+     *
+     * @type {boolean}
+     * @readonly
+     */
+    supportsReverseZ = false;
 
     /**
      * True if the device supports clip distances (WebGPU only). Clip distances allow you to restrict
@@ -844,11 +883,9 @@ class GraphicsDevice extends EventHandler {
         this.buffers = new Set();
 
         this._vram = {
-            // #if _PROFILER
             texShadow: 0,
             texAsset: 0,
             texLightmap: 0,
-            // #endif
             tex: 0,
             vb: 0,
             ib: 0,
@@ -1452,6 +1489,17 @@ class GraphicsDevice extends EventHandler {
     }
 
     /**
+     * Sets whether the current render pass renders into a reversed depth buffer, see
+     * {@link RenderPass#reverseZ}. Called by the render pass when it renders.
+     *
+     * @param {boolean} reverseZ - True for a reversed depth buffer.
+     * @ignore
+     */
+    setReverseZ(reverseZ) {
+        Debug.assert(!reverseZ || this.supportsReverseZ, 'Reverse-z is not supported by the graphics device.');
+    }
+
+    /**
      * Controls how triangles are culled based on their face direction. The default cull mode is
      * {@link CULLFACE_BACK}.
      *
@@ -1613,7 +1661,9 @@ class GraphicsDevice extends EventHandler {
      * Returns the buffer used to store arguments for indirect draw calls. The size of the buffer is
      * controlled by the {@link maxIndirectDrawCount} property. This buffer can be passed to a
      * {@link Compute} shader along with a slot obtained by calling {@link getIndirectDrawSlot}, in
-     * order to prepare indirect draw parameters. Also see {@link MeshInstance#setIndirect}.
+     * order to prepare indirect draw parameters. Also see {@link MeshInstance#setIndirect}. The
+     * buffer can also be read back, see {@link StorageBuffer#read}, for example to inspect the
+     * parameters a compute shader wrote.
      *
      * Only available on WebGPU, returns null on other platforms.
      *
@@ -1641,7 +1691,8 @@ class GraphicsDevice extends EventHandler {
      * Returns the buffer used to store arguments for indirect compute dispatch calls. The size of
      * the buffer is controlled by the {@link maxIndirectDispatchCount} property. This buffer can
      * be passed to a {@link Compute} shader along with a slot obtained by calling
-     * {@link getIndirectDispatchSlot}, in order to prepare indirect dispatch parameters.
+     * {@link getIndirectDispatchSlot}, in order to prepare indirect dispatch parameters. The
+     * buffer can also be read back, see {@link StorageBuffer#read}.
      *
      * Only available on WebGPU, returns null on other platforms.
      *
@@ -1673,20 +1724,16 @@ class GraphicsDevice extends EventHandler {
 
         if (target.initialized) return;
 
-        // #if _PROFILER
         const startTime = now();
         this.fire('fbo:create', {
             timestamp: startTime,
             target: this
         });
-        // #endif
 
         target.init();
         this.targets.add(target);
 
-        // #if _PROFILER
         this._renderTargetCreationTime += now() - startTime;
-        // #endif
     }
 
     /**
